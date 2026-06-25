@@ -76,6 +76,8 @@ apply:
 | `composed` | ≥3 execution-dependency hops (e.g. knights → arithmetic → ordering) | chain length / per-hop difficulty |
 | `redefined_ops` | arithmetic with counterfactually redefined operators | number of operations |
 | `dynamic_pivot` | **genuine backtracking**: turn 1 commits a count, turn 2 reveals the moves never happened, forcing a revision | number of updates before the pivot |
+| `false_lemma` | **premise-flaw trap**: a plausible-but-false "the total is conserved" note must be rejected, not trusted | number of updates |
+| `noise_haystack` | **high-similarity needle**: a real arithmetic chain buried under structurally-identical decoy chains about other people | number of operations / decoys |
 
 - **Numeric robustness probes** (`arithmetic`, `state_tracking`, `ordering`,
   `sequences`) measure compositional and perturbation-resilient reasoning — not just

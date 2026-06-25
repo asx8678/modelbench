@@ -37,6 +37,8 @@ Eleven problem families:
 | `composed` | ≥3 execution-dependency hops (e.g. knights → arithmetic → ordering) | chain length / difficulty of each hop |
 | `redefined_ops` | arithmetic with counterfactually redefined operators | number of operations |
 | `dynamic_pivot` | genuine backtracking: turn 1 commits a count, turn 2 reveals the moves never happened → revise | updates before the pivot |
+| `false_lemma` | premise-flaw trap: a plausible-but-false "total is conserved" note must be rejected | number of updates |
+| `noise_haystack` | high-similarity needle: a real arithmetic chain buried under near-identical decoy chains | operations / decoys |
 
 The four numeric families (`arithmetic`, `state_tracking`, `ordering`, `sequences`) are **robustness probes**: they measure compositional and perturbation-resilient reasoning, not just final accuracy. The CSP families (`knights_knaves`, `logic_grid`, `unsat_csp`) add **deductive / constraint-satisfaction** load that scales steeply (8 islanders = 2⁸ assignments; 7 floors = 7! arrangements) and is where strong reasoners separate from pattern-matchers. `retroactive_edit`, `multi_turn_inject`, `composed`, and `redefined_ops` test dynamic, multi-hop, and counterfactual execution.
 

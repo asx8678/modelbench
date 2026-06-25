@@ -1197,6 +1197,95 @@ def _verify_dynamic_pivot(prompt, gold):
     return str(state.get(qc)) == str(gold)
 
 
+# ------------------------------------------------ 12. false_lemma (premise-flaw trap)
+# A state-tracking total where a plausible-but-FALSE "helpful note" claims the total
+# is conserved ("every step only relocates items"). It is false because the sequence
+# also adds and/or removes items. A model that trusts the lemma answers the initial
+# total; the correct answer must reject the premise and re-sum. (H7 / Phase-2 epistemic
+# premise-flaw vector.)
+def gen_false_lemma(difficulty, structure_seed, surface_seed, distractor):
+    rs = _rng("lemma-struct", difficulty, structure_seed)
+    ru = _rng("lemma-surf", structure_seed, surface_seed)
+    item = ru.choice(ITEMS)
+    names = ru.sample(CONTAINERS, 3)
+    state = [rs.randint(5, 20) for _ in range(3)]
+    total0 = sum(state)
+    clauses = [f"{names[i].capitalize()} has {state[i]} {item}." for i in range(3)]
+    net = 0                                        # change to the TOTAL (moves are net-zero)
+    for _ in range(max(2, difficulty)):
+        op = rs.choice(["add", "remove", "move"])
+        i = rs.randrange(3)
+        if op == "add" or (op == "remove" and state[i] <= 1):
+            k = rs.randint(2, 12); state[i] += k; net += k
+            clauses.append(f"{k} {item} are added to {names[i]}.")
+        elif op == "remove":
+            k = rs.randint(1, state[i]); state[i] -= k; net -= k
+            clauses.append(f"{k} {item} are removed from {names[i]}.")
+        else:
+            j = rs.choice([x for x in range(3) if x != i])
+            if state[i] <= 0:
+                k = rs.randint(2, 12); state[i] += k; net += k
+                clauses.append(f"{k} {item} are added to {names[i]}.")
+            else:
+                k = rs.randint(1, state[i]); state[i] -= k; state[j] += k
+                clauses.append(f"{k} {item} are moved from {names[i]} to {names[j]}.")
+    if net == 0:                                   # ensure the false lemma is load-bearing
+        i = rs.randrange(3); k = rs.randint(2, 12); state[i] += k; net += k
+        clauses.append(f"{k} {item} are added to {names[i]}.")
+    total_final = total0 + net
+    clauses.append(f"Note: every step above simply relocates {item} between the "
+                   f"containers, so the total number of {item} never changes; it "
+                   f"stays {total0}.")
+    prompt = (" ".join(clauses) +
+              f" How many {item} are there in total across all three containers now?")
+    return prompt, str(total_final), "int", None
+
+
+def _verify_false_lemma(prompt, gold):
+    mq = re.search(r"How many (\w+) are there in total", prompt)
+    if not mq:
+        return False
+    item = mq.group(1)
+    total = 0
+    for s in _sentences(prompt):
+        m = re.match(r"(.+?) has (\d+) " + re.escape(item) + r"\.", s)
+        if m and " are " not in s:
+            total += int(m.group(2))
+    for s in _sentences(prompt):                   # the 'Note:' lemma is prose, not an op
+        if (m := re.match(r"(\d+) " + re.escape(item) + r" are added to ", s)):
+            total += int(m.group(1))
+        elif (m := re.match(r"(\d+) " + re.escape(item) + r" are removed from ", s)):
+            total -= int(m.group(1))
+        # moves leave the total unchanged
+    return str(total) == str(gold)
+
+
+# ------------------------------------------------ 13. noise_haystack (high-similarity distractors)
+# A real arithmetic problem about `subj`, buried under several COMPLETE,
+# structurally-identical arithmetic chains about OTHER people with the SAME item
+# (maximal embedding similarity, zero parse overlap once the subject is bound). The
+# model must locate the queried subject's chain among near-identical decoys. (H8 /
+# Phase-2 semantic-noise vector.)
+def gen_noise_haystack(difficulty, structure_seed, surface_seed, distractor):
+    rd = _rng("haystack-distract", difficulty, structure_seed, surface_seed)
+    core_prompt, gold, _at, _ch = gen_arithmetic(difficulty, structure_seed, surface_seed, False)
+    subj = re.search(r"does (.+?) have now\?", core_prompt).group(1)
+    item = re.search(r"How many (\w+) does", core_prompt).group(1)
+    others = [n for n in NAMES if n != subj]
+    rd.shuffle(others)
+    decoys = []
+    for d in range(3 + difficulty):                # decoys scale with difficulty
+        oname = others[d % len(others)]
+        cur = rd.randint(3, 20)
+        decoys.append(f"{oname} starts with {cur} {item}.")
+        for _ in range(2 + rd.randrange(3)):
+            verb = rd.choice(["buys", "finds", "is given", "picks up"])
+            decoys.append(f"{oname} {verb} {rd.randint(2, 15)} more {item}.")
+    rd.shuffle(decoys)                             # scatter so the needle isn't first/last
+    prompt = " ".join(decoys) + " " + core_prompt
+    return prompt, gold, "int", None
+
+
 GENERATORS = {
     "arithmetic": gen_arithmetic,
     "state_tracking": gen_state,
@@ -1210,6 +1299,8 @@ GENERATORS = {
     "redefined_ops": gen_redefined_ops,
     "unsat_csp": gen_unsat_csp,
     "dynamic_pivot": gen_dynamic_pivot,
+    "false_lemma": gen_false_lemma,
+    "noise_haystack": gen_noise_haystack,
 }
 SUPPORTS_DISTRACTOR = {"arithmetic", "state_tracking", "ordering", "retroactive_edit",
                        "redefined_ops"}
@@ -1608,6 +1699,8 @@ _VERIFIERS = {
     "redefined_ops": _verify_redefined_ops,
     "unsat_csp": _verify_unsat_csp,
     "dynamic_pivot": _verify_dynamic_pivot,
+    "false_lemma": _verify_false_lemma,
+    "noise_haystack": _verify_arithmetic,        # core is arithmetic; decoys are subject-inert
 }
 
 def verify_gold(p) -> bool:

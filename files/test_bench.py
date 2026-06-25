@@ -209,6 +209,43 @@ def test_surface_variants_vary_phrasing_hold_gold():
     assert saw_lexical_variation, "surface variants never changed verb phrasing"
 
 
+def test_false_lemma_trap_is_load_bearing():
+    # bench-dqw / H7: the "Note: ... total never changes; it stays N" lemma is FALSE
+    # (the sequence also adds/removes). Trusting it (answering N) must be WRONG, and
+    # the independent verifier must reject the premise and re-sum to the true gold.
+    fooled = 0
+    for diff in range(1, 7):
+        for seed in range(30):
+            p = generators._mk("false_lemma", diff, seed, 0, False, "base", "g")
+            assert generators.verify_gold(p) is True
+            claimed = re.search(r"stays (\d+)", p.prompt).group(1)
+            assert claimed != p.gold              # lemma is false: trusting it is wrong
+            if claimed != p.gold:
+                fooled += 1
+    assert fooled > 0
+
+
+def test_noise_haystack_needle_survives_decoys():
+    # bench-dqw / H8: a real arithmetic problem buried under structurally-identical
+    # decoy chains about other people (same item). The subject-bound verifier finds
+    # the needle; a subject-BLIND running-total solver is polluted by the decoys.
+    fooled = 0
+    for diff in range(1, 6):
+        for seed in range(30):
+            p = generators._mk("noise_haystack", diff, seed, 0, False, "base", "g")
+            assert generators.verify_gold(p) is True
+            # subject-blind solver: sum every 'starts with' and 'more' it sees
+            naive = 0
+            for s in re.split(r"(?<=\.)\s+", p.prompt):
+                if (m := re.search(r"starts with (\d+)", s)):
+                    naive += int(m.group(1))
+                elif (m := re.search(r"(\d+) more", s)):
+                    naive += int(m.group(1))
+            if str(naive) != p.gold:
+                fooled += 1
+    assert fooled > 0, "decoys never polluted a relevance-blind solver"
+
+
 def test_dynamic_pivot_structure_and_subgold():
     # bench-7fo / E3-H3: two turns, a committed subgold, and a load-bearing pivot
     # (gold != subgold). The subgold must re-derive as the LITERAL reading (moves
@@ -786,6 +823,9 @@ def test_baseline_metrics_unchanged():
                 # bench-7fo adds the dynamic_pivot family (genuine multi-turn
                 # backtracking), absent from the baseline fixture.
                 top.pop("dynamic_pivot", None)
+                # bench-dqw adds the false_lemma and noise_haystack families.
+                top.pop("false_lemma", None)
+                top.pop("noise_haystack", None)
         return out
 
     assert json.dumps(per_family(res), sort_keys=True, indent=2) == \

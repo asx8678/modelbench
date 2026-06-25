@@ -71,7 +71,8 @@ def _modal_frequency(golds):
 # bounded to 1..n, so it must NOT be lumped in here.
 _UNBOUNDED_INT_FAMILIES = frozenset({
     "arithmetic", "state_tracking", "sequences", "composed",
-    "retroactive_edit", "multi_turn_inject",
+    "retroactive_edit", "multi_turn_inject", "dynamic_pivot",
+    "false_lemma", "noise_haystack",
 })
 
 
