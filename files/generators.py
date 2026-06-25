@@ -282,7 +282,13 @@ def _ordinal(n):
     return f"{n}{['th','st','nd','rd','th'][min(n % 10, 4)]}"
 
 def gen_order(difficulty, structure_seed, surface_seed, distractor):
-    """Transitive comparison. Difficulty = number of entities - 2."""
+    """Transitive comparison. Difficulty = number of entities - 2.
+
+    Ships the adjacent chain (the minimal sufficient set) PLUS a subset of
+    the non-adjacent pairwise facts so degree-counting shortcuts become
+    less effective. The verifier in _verify_order does Kahn's algorithm
+    on the full edge set and rejects ambiguous graphs.
+    """
     rs = _rng("order-struct", difficulty, structure_seed)
     ru = _rng("order-surf", structure_seed, surface_seed)
     rd = _rng("order-distract", structure_seed)
@@ -291,17 +297,29 @@ def gen_order(difficulty, structure_seed, surface_seed, distractor):
     names = rs.sample(NAMES, m)
     comp, anti, sup_hi, sup_lo = rs.choice(REL)
     order = names[:]                            # order[0] highest ... order[-1] lowest
-    pairs = [(order[i], order[i + 1]) for i in range(m - 1)]
+
+    # Adjacent chain edges: the minimal sufficient set.
+    edges = {order[i]: {order[i + 1]} for i in range(m - 1)}
+
+    # Non-adjacent transitive extras: pick a random subset of size
+    # roughly m (so total edges are ~2*(m-1), giving each entity
+    # balanced connectivity). Withheld edges = m*(m-1)/2 - 1 - m.
+    non_adjacent = [(order[i], order[j])
+                    for i in range(m) for j in range(i + 2, m)]
+    rs.shuffle(non_adjacent)
+    for a, b in non_adjacent[:m]:
+        edges.setdefault(a, set()).add(b)
 
     # Ask a non-extreme rank to prevent degree-counting shortcuts.
     rank_idx = rs.randint(1, m - 2)             # 1..m-2 (never 0 or m-1)
     rank_word = _ordinal(rank_idx + 1)          # 1-indexed ordinal
     gold = order[rank_idx]
 
-    # Keep all adjacent pairs — dropping any disconnects the graph.
-    pres = pairs[:]; ru.shuffle(pres)
+    # Emit facts in random order.
+    flat = [(a, b) for a, bs in edges.items() for b in bs]
+    ru.shuffle(flat)
     clauses = []
-    for a, b in pres:
+    for a, b in flat:
         if ru.random() < 0.5:
             clauses.append(f"{a} is {comp} than {b}.")
         else:
@@ -312,6 +330,7 @@ def gen_order(difficulty, structure_seed, surface_seed, distractor):
 
     prompt = " ".join(clauses) + f" Who is the {rank_word} {sup_hi}?"
     return prompt, gold, "choice", names
+
 
 
 # ------------------------------------------------------------- 4. sequences
