@@ -993,3 +993,57 @@ def test_retroactive_edit_factor_is_load_bearing():
         assert m, "expected an 'Actually... N times as many' edit clause"
         perturbed = p.prompt[:m.start(2)] + str(int(m.group(2)) + 1) + p.prompt[m.end(2):]
         assert generators._verify_retroactive_edit(perturbed, p.gold) is False
+
+
+def test_token_entropy_stats_math():
+    # bench-aes: entropy over the renormalized top-k distribution.
+    import math as _m
+    uniform = [{"token": "a", "logprob": _m.log(0.5),
+                "top_logprobs": [{"token": "a", "logprob": _m.log(0.5)},
+                                 {"token": "b", "logprob": _m.log(0.5)}]}]
+    s = runner.token_entropy_stats(uniform)
+    assert s["token_entropy_mean"] == pytest.approx(1.0, abs=1e-9)   # 2 equal -> 1 bit
+    assert s["token_entropy_max"] == pytest.approx(1.0, abs=1e-9)
+    assert s["logprob_divergence_spikes"] == 0
+    # a low-probability committed token is a divergence spike
+    spike = [{"token": "x", "logprob": -3.0,
+              "top_logprobs": [{"token": "x", "logprob": -3.0},
+                               {"token": "y", "logprob": -0.05}]}]
+    assert runner.token_entropy_stats(spike)["logprob_divergence_spikes"] == 1
+    assert runner.token_entropy_stats([]) is None
+
+
+def test_logprob_telemetry_end_to_end(monkeypatch):
+    # bench-aes: with a 'logprobs' capability and a server that returns logprobs,
+    # token-entropy telemetry is computed and stored (observable on open weights).
+    items = generators.build_dataset(["arithmetic"], 1, 1, 1, verify=False)
+    con, ds = _db_with(items)
+    body = {
+        "choices": [{
+            "message": {"content": f"ANSWER: {ds[0]['gold']}"},
+            "logprobs": {"content": [
+                {"token": "A", "logprob": -0.01,
+                 "top_logprobs": [{"token": "A", "logprob": -0.01},
+                                  {"token": "B", "logprob": -4.0}]},
+                {"token": "7", "logprob": -3.0,
+                 "top_logprobs": [{"token": "7", "logprob": -3.0},
+                                  {"token": "8", "logprob": -0.05}]},
+            ]},
+        }],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 2},
+    }
+
+    class _Resp:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return json.dumps(body).encode()
+
+    monkeypatch.setattr(runner.urllib.request, "urlopen", lambda *a, **k: _Resp())
+    cfg = _cfg(model="m", base_url="http://x/v1", capabilities=["logprobs"], n=1)
+    runner.run(con, "r", ds, cfg)
+    tel = storage.load_telemetry(con, "r", ds[0]["item_id"], 0)
+    assert tel is not None
+    assert tel["token_entropy_mean"] is not None
+    assert tel["logprob_divergence_spikes"] == 1            # the '7' token at logprob -3.0
+    # and the unobservable fields are honestly annotated, not faked
+    assert tel["unobservable_fields"].get("tot_branch_map") == "unobservable_without_raw_cot"

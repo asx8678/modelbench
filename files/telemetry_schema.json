@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bench/telemetry/TelemetryPayload.schema.json",
+  "title": "TelemetryPayload",
+  "description": "Per-(run,item,sample) telemetry as actually emitted by runner._build_telemetry and persisted by storage.save_telemetry. Honesty is enforced: a metric that the provider does not expose is null AND named in `unobservable_fields` with the reason -- never reported as zero. Token-entropy fields are populated only on a provider that returns logprobs (open-weights via vLLM/TGI); Tree-of-Thought branch mapping and intra-reasoning token rate are physically unobservable when the hosted chain-of-thought is omitted, and stay null+annotated.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["capabilities", "reasoning_token_source", "unobservable_fields"],
+  "properties": {
+    "capabilities": {
+      "type": "array", "items": {"type": "string"},
+      "description": "Provider capability flags, e.g. native_anthropic, logprobs."
+    },
+    "reasoning_token_source": {
+      "enum": ["native_usage", "unavailable"],
+      "description": "native_usage when the provider returns a thinking-token count; else unavailable."
+    },
+    "prompt_tokens": {"type": ["integer", "null"]},
+    "completion_tokens": {"type": ["integer", "null"]},
+    "reasoning_tokens": {"type": ["integer", "null"], "description": "0 when not exposed by the provider."},
+    "reasoning_density_proxy": {"type": ["number", "null"], "description": "(completion - answer_estimate)/answer_estimate; null without a reasoning-token count."},
+
+    "ttft_ms": {"type": ["integer", "null"], "description": "time to first stream event."},
+    "first_reasoning_ms": {"type": ["integer", "null"], "description": "ops-only; equals ttft when display:omitted."},
+    "reasoning_wall_ms": {"type": ["integer", "null"], "description": "answer_wall - ttft; lower bound on wall-clock reasoning under display:omitted."},
+    "answer_wall_ms": {"type": ["integer", "null"], "description": "time from request start to first answer token."},
+
+    "token_entropy_mean": {"type": ["number", "null"], "description": "MEASURED only with provider logprobs: mean per-token H(X) over the renormalized top-k distribution (bits)."},
+    "token_entropy_max": {"type": ["number", "null"], "description": "max per-token entropy (bits); null without logprobs."},
+    "friction_transitions": {"type": ["integer", "null"], "description": "tokens whose entropy exceeds mean+2*std (high-friction calculation vs smooth memorized generation); null without logprobs."},
+    "logprob_divergence_spikes": {"type": ["integer", "null"], "description": "tokens whose chosen-token logprob < -2.0 (committed to a low-probability token); null without logprobs."},
+
+    "unobservable_fields": {
+      "type": "object",
+      "description": "Per-metric provenance for everything NOT measured on this provider. Keys present here MUST be read as 'not collected', never as zero.",
+      "additionalProperties": {"type": "string"},
+      "examples": [{
+        "token_entropy": "requires_provider_logprobs",
+        "thinking_tps": "unobservable",
+        "tot_branch_map": "unobservable_without_raw_cot",
+        "reasoning_tokens": "not_exposed_by_provider"
+      }]
+    }
+  }
+}

@@ -19,6 +19,7 @@ Mock answers are deterministic per (item, sample) so test runs are reproducible.
 
 import sys
 import json
+import math
 import time
 import random
 import hashlib
@@ -208,12 +209,54 @@ def call_anthropic(api_key, model, messages, temperature, max_tokens, timeout):
     return text, pt, ct, timings, think_tokens
 
 
-def call_api(base_url, api_key, model, messages, temperature, max_tokens, timeout):
-    """One completion. Returns (text, prompt_tokens, completion_tokens).
+def token_entropy_stats(content):
+    """Per-token entropy stats from OpenAI-style logprobs `content` -- a list of
+    {token, logprob, top_logprobs:[{token, logprob}, ...]}. This is the one Phase-3
+    'latent friction' signal that IS observable, and only on a provider that returns
+    logprobs (open-weights via vLLM/TGI; not hosted Anthropic). Entropy H(X) is taken
+    over the renormalized top-k distribution per token. Returns None if no usable tokens.
+
+    friction_transitions  : tokens whose entropy exceeds mean+2*std (high-friction
+                            calc vs smooth memorized generation).
+    logprob_divergence_spikes : tokens whose chosen-token logprob < -2.0 (the model
+                            committed to a low-probability token -- a hard turn)."""
+    entropies, divergence = [], 0
+    for tok in content or []:
+        tl = tok.get("top_logprobs") or []
+        ps = [math.exp(e["logprob"]) for e in tl if e.get("logprob") is not None]
+        z = sum(ps)
+        if z <= 0:
+            continue
+        ps = [p / z for p in ps]
+        entropies.append(-sum(p * math.log2(p) for p in ps if p > 0))
+        if tok.get("logprob") is not None and tok["logprob"] < -2.0:
+            divergence += 1
+    if not entropies:
+        return None
+    mean = sum(entropies) / len(entropies)
+    var = sum((h - mean) ** 2 for h in entropies) / len(entropies)
+    sd = math.sqrt(var)
+    friction = sum(1 for h in entropies if sd > 0 and h > mean + 2 * sd)
+    return {
+        "token_entropy_mean": mean,
+        "token_entropy_max": max(entropies),
+        "friction_transitions": friction,
+        "logprob_divergence_spikes": divergence,
+        "n_tokens_scored": len(entropies),
+    }
+
+
+def call_api(base_url, api_key, model, messages, temperature, max_tokens, timeout,
+             want_logprobs=False):
+    """One completion. Returns (text, prompt_tokens, completion_tokens, logprob_stats).
+    logprob_stats is None unless want_logprobs and the server returns logprobs.
     Raises ValueError if the response is not shaped like a chat completion."""
     url = base_url.rstrip("/") + "/chat/completions"
     payload = {"model": model, "messages": messages,
                "temperature": temperature, "max_tokens": max_tokens}
+    if want_logprobs:
+        payload["logprobs"] = True
+        payload["top_logprobs"] = 5
     data = json.dumps(payload).encode()
     req = urllib.request.Request(url, data=data, method="POST")
     req.add_header("Content-Type", "application/json")
@@ -229,7 +272,11 @@ def call_api(base_url, api_key, model, messages, temperature, max_tokens, timeou
     if text is None:
         raise ValueError("response choice missing message.content")
     usage = body.get("usage") or {}
-    return text, usage.get("prompt_tokens"), usage.get("completion_tokens")
+    logprob_stats = None
+    if want_logprobs:
+        content = (choices[0].get("logprobs") or {}).get("content")
+        logprob_stats = token_entropy_stats(content)
+    return text, usage.get("prompt_tokens"), usage.get("completion_tokens"), logprob_stats
 
 
 def _mock_seed(item_id, sample_idx):
@@ -300,10 +347,12 @@ def _call_turn(messages, item, cfg, sample_idx, turn_idx):
             cfg["api_key"], cfg["model"], messages,
             cfg["temperature"], cfg["max_tokens"], cfg["timeout"])
         return text, pt, ct, _build_telemetry(cfg, pt, ct, timings, think, text)
-    text, pt, ct = call_api(
+    text, pt, ct, lp = call_api(
         cfg["base_url"], cfg["api_key"], cfg["model"], messages,
-        cfg["temperature"], cfg["max_tokens"], cfg["timeout"])
-    return text, pt, ct, None
+        cfg["temperature"], cfg["max_tokens"], cfg["timeout"],
+        want_logprobs=_provider_has_capability(cfg, "logprobs"))
+    telemetry = _build_telemetry(cfg, pt, ct, None, 0, text, logprob_stats=lp) if lp else None
+    return text, pt, ct, telemetry
 
 
 def _sequential_completion(item, cfg, sample_idx):
@@ -352,12 +401,15 @@ def _one_completion(item, cfg, sample_idx):
                 telemetry = _build_telemetry(cfg, pt, ct, timings, think_tokens, text)
                 return text, pt, ct, telemetry, None, None
             else:
-                text, pt, ct = call_api(
+                text, pt, ct, lp = call_api(
                     cfg["base_url"], cfg["api_key"], cfg["model"],
                     build_messages(item, cfg["ask_confidence"]),
-                    cfg["temperature"], cfg["max_tokens"], cfg["timeout"])
-                # OpenAI-compat: no stream timings available.
-                return text, pt, ct, None, None, None
+                    cfg["temperature"], cfg["max_tokens"], cfg["timeout"],
+                    want_logprobs=_provider_has_capability(cfg, "logprobs"))
+                # OpenAI-compat: no stream timings; logprob entropy when available.
+                telemetry = _build_telemetry(cfg, pt, ct, None, 0, text,
+                                             logprob_stats=lp) if lp else None
+                return text, pt, ct, telemetry, None, None
         except _RETRYABLE as e:
             last_err = e
             if attempt < cfg["retries"]:
@@ -365,8 +417,11 @@ def _one_completion(item, cfg, sample_idx):
     return None, None, None, None, last_err, None
 
 
-def _build_telemetry(cfg, prompt_tokens, completion_tokens, timings, think_tokens, text):
-    """Build an honest telemetry payload for the native Anthropic path."""
+def _build_telemetry(cfg, prompt_tokens, completion_tokens, timings, think_tokens, text,
+                     logprob_stats=None):
+    """Build an honest telemetry payload. Token-entropy fields are populated only
+    when the provider returned logprobs (open-weights path); otherwise they are
+    annotated as unobservable rather than reported as zero."""
     capabilities = list(cfg.get("capabilities", []))
     unobservable = {}
 
@@ -409,10 +464,21 @@ def _build_telemetry(cfg, prompt_tokens, completion_tokens, timings, think_token
         reasoning_wall_ms = None
         unobservable["reasoning_wall_ms"] = "ttft_or_answer_wall_unavailable"
 
-    # These columns are unobservable on Anthropic / current stream parser.
-    unobservable["token_entropy"] = "unobservable"
+    # Token entropy / logprob divergence: observable ONLY with provider logprobs.
+    if logprob_stats:
+        token_entropy_mean = logprob_stats["token_entropy_mean"]
+        token_entropy_max = logprob_stats["token_entropy_max"]
+        friction_transitions = logprob_stats["friction_transitions"]
+        logprob_divergence_spikes = logprob_stats["logprob_divergence_spikes"]
+    else:
+        token_entropy_mean = token_entropy_max = None
+        friction_transitions = logprob_divergence_spikes = None
+        unobservable["token_entropy"] = "requires_provider_logprobs"
+
+    # These remain unobservable: hosted CoT is omitted, so there is no token stream
+    # to map a Tree-of-Thought over, and no intra-reasoning token rate.
     unobservable["thinking_tps"] = "unobservable"
-    unobservable["tot_branch_map"] = "unobservable"
+    unobservable["tot_branch_map"] = "unobservable_without_raw_cot"
 
     return {
         "capabilities": capabilities,
@@ -425,6 +491,10 @@ def _build_telemetry(cfg, prompt_tokens, completion_tokens, timings, think_token
         "first_reasoning_ms": first_reasoning_ms,
         "reasoning_wall_ms": reasoning_wall_ms,
         "answer_wall_ms": answer_wall_ms,
+        "token_entropy_mean": token_entropy_mean,
+        "token_entropy_max": token_entropy_max,
+        "friction_transitions": friction_transitions,
+        "logprob_divergence_spikes": logprob_divergence_spikes,
         "unobservable_fields": unobservable,
     }
 

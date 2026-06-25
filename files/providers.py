@@ -13,6 +13,10 @@ $BENCH_PROVIDERS env var). It has two maps:
   * api_key is a literal fallback (handy for local servers that want a dummy key).
   * context_window / max_tokens are metadata; max_tokens, if set, becomes the
     default completion budget for that model.
+  * a provider may carry a "capabilities" list. "native_anthropic" selects the
+    native streaming path; "logprobs" requests per-token logprobs (OpenAI-compatible
+    open-weights servers like vLLM/TGI) so token-entropy telemetry is collected.
+    See telemetry_schema.json for the emitted TelemetryPayload.
 
 Nothing here is mandatory: `run --base-url ... --model <raw id>` still works with
 no config file at all, and a raw model id with no provider falls back to a local

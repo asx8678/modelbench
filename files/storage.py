@@ -38,6 +38,8 @@ CREATE TABLE IF NOT EXISTS telemetry (
     prompt_tokens INTEGER, completion_tokens INTEGER, reasoning_tokens INTEGER,
     reasoning_density_proxy REAL,
     ttft_ms INTEGER, first_reasoning_ms INTEGER, reasoning_wall_ms INTEGER, answer_wall_ms INTEGER,
+    token_entropy_mean REAL, token_entropy_max REAL,
+    friction_transitions INTEGER, logprob_divergence_spikes INTEGER,
     unobservable_fields TEXT,
     UNIQUE(run_id, item_id, sample_idx)
 );
@@ -108,20 +110,26 @@ def save_telemetry(con, run_id, item_id, sample_idx, *, capabilities=None,
                    completion_tokens=None, reasoning_tokens=None,
                    reasoning_density_proxy=None, ttft_ms=None,
                    first_reasoning_ms=None, reasoning_wall_ms=None,
-                   answer_wall_ms=None, unobservable_fields=None):
+                   answer_wall_ms=None, token_entropy_mean=None,
+                   token_entropy_max=None, friction_transitions=None,
+                   logprob_divergence_spikes=None, unobservable_fields=None):
     con.execute(
         """INSERT OR REPLACE INTO telemetry
            (run_id, item_id, sample_idx, capabilities, reasoning_token_source,
             prompt_tokens, completion_tokens, reasoning_tokens,
             reasoning_density_proxy, ttft_ms, first_reasoning_ms,
-            reasoning_wall_ms, answer_wall_ms, unobservable_fields)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            reasoning_wall_ms, answer_wall_ms,
+            token_entropy_mean, token_entropy_max,
+            friction_transitions, logprob_divergence_spikes, unobservable_fields)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (run_id, item_id, sample_idx,
          json.dumps(capabilities) if capabilities is not None else None,
          reasoning_token_source,
          prompt_tokens, completion_tokens, reasoning_tokens,
          reasoning_density_proxy, ttft_ms, first_reasoning_ms,
          reasoning_wall_ms, answer_wall_ms,
+         token_entropy_mean, token_entropy_max,
+         friction_transitions, logprob_divergence_spikes,
          json.dumps(unobservable_fields) if unobservable_fields is not None else None),
     )
 
