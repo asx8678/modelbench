@@ -15,6 +15,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+import numpy as np
 import metrics
 
 # Okabe-Ito (skip pure black for lines on white; keep for text)
@@ -99,6 +100,70 @@ def distractibility_chart(run_results, labels, outpath):
     plt.close(fig)
     return outpath
 
+def confabulation_vs_confidence_chart(run_results, labels, outpath):
+    """Scatter: confabulation rate vs stated confidence (ECE/average) per model."""
+    xs, ys, labs = [], [], []
+    for i, (res, lab) in enumerate(zip(run_results, labels)):
+        cr = res.get("confabulation_rate")
+        if cr is None:
+            continue
+        conf = res.get("calibration")
+        y = conf["ece"] if conf else None
+        if y is None:
+            continue
+        xs.append(cr)
+        ys.append(y)
+        labs.append(lab)
+    if not xs:
+        return None
+
+    fig, ax = plt.subplots(figsize=(7.0, 4.8))
+    for i, (x, y, lab) in enumerate(zip(xs, ys, labs)):
+        style = _style(i)
+        ax.plot(x, y, **{k: v for k, v in style.items() if k not in ("linestyle", "markersize")},
+                linestyle="none", markersize=10, label=lab)
+        ax.annotate(lab, (x, y), textcoords="offset points", xytext=(6, 4), fontsize=10)
+
+    ax.set_xlabel("confabulation rate")
+    ax.set_ylabel("expected calibration error (ECE)")
+    ax.set_title("Confabulation vs Confidence", fontweight="bold")
+    ax.set_xlim(-0.03, max(1.03, max(xs) * 1.05))
+    ax.set_ylim(-0.03, max(1.03, max(ys) * 1.05) if ys else 1.03)
+    ax.legend(fontsize=10, framealpha=0.9)
+    fig.tight_layout()
+    fig.savefig(outpath, bbox_inches="tight")
+    plt.close(fig)
+    return outpath
+
+
+def accuracy_above_chance_chart(run_results, labels, outpath):
+    """Grouped bars: chance-corrected accuracy per family, per model."""
+    fams = sorted({f for res in run_results for f in res.get("acc_above_chance", {})})
+    if not fams:
+        return None
+    fig, ax = plt.subplots(figsize=(max(7, 1.6 * len(fams) * len(labels)), 4.8))
+    n = len(labels); width = 0.8 / max(n, 1)
+    x = range(len(fams))
+    for i, (res, lab) in enumerate(zip(run_results, labels)):
+        vals = res.get("acc_above_chance", {})
+        ys = [vals.get(f) for f in fams]
+        off = (i - (n - 1) / 2) * width
+        c = OKABE[i % len(OKABE)]
+        ax.bar([xi + off for xi in x],
+               [y if y is not None else 0 for y in ys],
+               width * 0.92, color=c, edgecolor="black", linewidth=0.6,
+               label=lab)
+    ax.set_xticks(list(x)); ax.set_xticklabels(fams)
+    ax.set_ylabel("accuracy above chance")
+    ax.set_ylim(-0.03, 1.03)
+    ax.set_title("Accuracy Above Chance by Family", fontweight="bold")
+    ax.legend(fontsize=10, ncol=max(1, n), framealpha=0.9)
+    fig.tight_layout()
+    fig.savefig(outpath, bbox_inches="tight")
+    plt.close(fig)
+    return outpath
+
+
 
 def write_csv(run_results, labels, outpath):
     with open(outpath, "w", newline="") as f:
@@ -125,9 +190,12 @@ def write_csv(run_results, labels, outpath):
                 w.writerow([lab, "coverage", "", "", round(res["coverage"]["coverage"], 4)])
             if res["calibration"]:
                 w.writerow([lab, "ece", "", "", round(res["calibration"]["ece"], 4)])
-            if res["passk"]:
-                w.writerow([lab, "maj@k", "", "", round(res["passk"]["maj@k"], 4)])
                 w.writerow([lab, "pass@k_oracle", "", "", round(res["passk"]["pass@k_oracle"], 4)])
+            if res.get("confabulation_rate") is not None:
+                w.writerow([lab, "confabulation_rate", "", "", round(res["confabulation_rate"], 4)])
+            for fam, v in res.get("acc_above_chance", {}).items():
+                if v is not None:
+                    w.writerow([lab, "acc_above_chance", fam, "", round(v, 4)])
 
 
 def _md_table(headers, rows):
@@ -136,6 +204,26 @@ def _md_table(headers, rows):
     for r in rows:
         out.append("| " + " | ".join(str(c) for c in r) + " |")
     return "\n".join(out)
+
+
+def _confab_cell(r):
+    return f"{r['confabulation_rate']:.3f}" if r.get("confabulation_rate") is not None else "—"
+
+
+def _above_chance_cell(r):
+    vals = [v for v in r.get("acc_above_chance", {}).values() if v is not None]
+    if not vals:
+        return "—"
+    return f"{float(np.mean(vals)):.3f}"
+
+
+def _acc_above_chance_cell(r, fam):
+    v = r.get("acc_above_chance", {}).get(fam)
+    return f"{v:.3f}" if v is not None else "—"
+
+def _coverage_cell(r):
+    c = r["coverage"]
+    return f"{c['coverage']:.3f}" if c["errored"] else "1.000"
 
 
 def _flip_cell(r):
@@ -152,20 +240,20 @@ def _passk_cell(r):
         return "—"
     return f"{pk['pass@1']:.3f} → maj {pk['maj@k']:.3f} → oracle {pk['pass@k_oracle']:.3f}"
 
-
-def _coverage_cell(r):
-    c = r["coverage"]
-    return f"{c['coverage']:.3f}" if c["errored"] else "1.000"
-
-
 def write_markdown(run_results, labels, charts, outpath):
     L = ["# Reasoning benchmark report", ""]
     L.append(_md_table(
-        ["model", "overall acc", "coverage", "answer-flip rate", "ECE",
-         "pass@1 → maj@k → oracle"],
-        [[lab, f"{r['overall_accuracy']:.3f}", _coverage_cell(r),
-          _flip_cell(r), _ece_cell(r), _passk_cell(r)]
+        ["model", "overall acc", "coverage", "confabulation", "answer-flip rate", "ECE",
+         "acc above chance", "pass@1 → maj@k → oracle"],
+        [[lab, f"{r['overall_accuracy']:.3f}", _coverage_cell(r), _confab_cell(r),
+          _flip_cell(r), _ece_cell(r), _above_chance_cell(r), _passk_cell(r)]
          for r, lab in zip(run_results, labels)]))
+    L += ["", "## Accuracy above chance by family", ""]
+    afams = sorted({f for r in run_results for f in r.get("acc_above_chance", {})})
+    if afams:
+        L.append(_md_table(["family"] + labels,
+                           [[f] + [_acc_above_chance_cell(r, f) for r in run_results]
+                            for f in afams]))
     L += ["", "## Accuracy by family", ""]
     fams = sorted({f for r in run_results for f in r["accuracy_by_family"]})
     L.append(_md_table(["family"] + labels,
@@ -210,6 +298,8 @@ def build_report(con, run_ids, outdir):
     charts = [
         degradation_chart(results, labels, os.path.join(outdir, "degradation.png")),
         distractibility_chart(results, labels, os.path.join(outdir, "distractibility.png")),
+        confabulation_vs_confidence_chart(results, labels, os.path.join(outdir, "confabulation_vs_confidence.png")),
+        accuracy_above_chance_chart(results, labels, os.path.join(outdir, "accuracy_above_chance.png")),
     ]
     write_csv(results, labels, os.path.join(outdir, "metrics.csv"))
     md = write_markdown(results, labels, charts, os.path.join(outdir, "report.md"))

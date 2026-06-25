@@ -16,24 +16,30 @@ that actually distinguish reasoning from pattern-matching:
 | **Surface invariance** | Same computation, different names — does the answer flip? | Answer flips mean it's keying on surface, not structure. |
 | **Calibration (ECE)** | Does stated confidence track correctness? | A smart system is uncertain when it should be. |
 | **pass@1 / maj@k / pass@k** | Single-shot vs majority-vote vs best-of-k | maj@k (self-consistency) is a deployable strategy; pass@k is an oracle upper bound. Report all three. |
+| **Chance-corrected accuracy (`acc_above_chance`)** | Accuracy normalized against the random-guess baseline for each family | A family with many possible answers looks harder than it is; this exposes true headroom above guessing. |
+| **Confabulation rate** | On ill-posed items (`UNDETERMINED`, `NO_SOLUTION`), does the model answer with a concrete value anyway? | Inventing answers for contradictory or under-constrained problems is worse than saying "unknown". |
+| **Grading fragility** | How often does the `ANSWER:` marker parse disagree with the fallback parse? | High fragility means the score depends on format compliance, not just reasoning. |
+| **Behavioral uncertainty** | Disagreement entropy and self-consistency gap across samples | Low stated confidence but high sample disagreement flags uncertainty the model doesn't report. |
 
-Six problem families:
+Thirteen problem families:
 
 | Family | What it probes | Difficulty axis |
 |---|---|---|
-| `arithmetic` | multi-hop quantitative word problems (add/sub/×/÷-exact) | number of operations |
+| `arithmetic` | multi-hop quantitative word problems (add/sub/×/÷ — exact) | number of operations |
 | `state_tracking` | item counts across containers through updates | number of updates |
 | `ordering` | transitive comparison | number of entities |
 | `sequences` | next-term rule induction (AP, GP, quadratic, fibonacci, interleaved, cubic) | rule-complexity tier 1..6 |
+| `retroactive_edit` | single-turn dynamic constraint: a late clause rewrites an earlier value | number of updates / edit distance |
+| `multi_turn_inject` | multi-turn state tracking: turn 1 sets state, turn 2 injects a new rule | number of state facts |
 | `knights_knaves` | truth-teller / liar **deduction** under self-reference | islanders (diff+2, up to 8) |
 | `logic_grid` | **constraint satisfaction** — place N people on N floors | floors (diff+2, up to 7) |
+| `unsat_csp` | premise-flaw detection: controlled ill-posed KK / logic-grid puzzles | n (diff+2); brute-force solution count |
+| `composed` | ≥3 execution-dependency hops (e.g. knights → arithmetic → ordering) | chain length / difficulty of each hop |
+| `redefined_ops` | arithmetic with counterfactually redefined operators | number of operations |
 
-`arithmetic` / `state_tracking` / `ordering` support distractor + surface probes.
-`knights_knaves` and `logic_grid` are the hardest discriminators: each is a
-contamination-proof CSP with a **unique, minimal, brute-force-verified** solution
-(drop any one clue and uniqueness breaks), and they support the surface probe
-(structure is chosen in slot space and only labelled afterwards, so renaming holds
-the answer fixed). `sequences` is difficulty/variance only.
+The four numeric families (`arithmetic`, `state_tracking`, `ordering`, `sequences`) are **robustness probes**: they measure compositional and perturbation-resilient reasoning, not just final accuracy. The CSP families (`knights_knaves`, `logic_grid`, `unsat_csp`) add **deductive / constraint-satisfaction** load that scales steeply (8 islanders = 2⁸ assignments; 7 floors = 7! arrangements) and is where strong reasoners separate from pattern-matchers. `retroactive_edit`, `multi_turn_inject`, `composed`, and `redefined_ops` test dynamic, multi-hop, and counterfactual execution.
+
+`arithmetic`, `state_tracking`, `ordering`, and `redefined_ops` support distractor + surface probes; `retroactive_edit` supports the distractor probe. CSP families (`knights_knaves`, `logic_grid`, `unsat_csp`) support the surface probe because the structure is chosen in slot space and only labelled afterwards, so renaming holds the answer fixed. `sequences` is difficulty/variance only. `composed`, `multi_turn_inject`, and `unsat_csp` are also structure-invariant where surface renaming is applied to each contained stage.
 
 ---
 
@@ -134,22 +140,24 @@ python cli.py report --db bench.db --runs llama32 gemma31 --out report
 ## The dataset knobs (`generate`)
 
 ```
---families a b c     subset of: arithmetic state_tracking ordering sequences
-                     knights_knaves logic_grid  (default: all)
+--families a b c     subset of: arithmetic state_tracking retroactive_edit multi_turn_inject
+                     ordering sequences knights_knaves logic_grid unsat_csp composed
+                     redefined_ops  (default: all)
 --min-diff / --max-diff   difficulty range = number of reasoning steps (default 1..6).
                      Some families select a discrete structure instead of a step count
                      and are capped so a higher --max-diff can't emit "difficulties"
                      that aren't actually harder (or aren't feasible to gold-verify):
-                     sequences = rule-complexity tier 1..6; knights_knaves = diff+2
-                     islanders (≤8); logic_grid = diff+2 floors (≤7).
+                     sequences = rule-complexity tier 1..6;
+                     knights_knaves / unsat_csp = diff+2 islanders (≤8);
+                     logic_grid = diff+2 floors (≤7);
+                     composed / redefined_ops / retroactive_edit / multi_turn_inject
+                     inherit the numeric caps of their constituent stages.
 --reps N             distinct structures per (family, difficulty). Higher N = tighter
                      variance estimates. 12–25 is a good range.
 --distractor         also emit a matched NoOp-distractor copy of every base item
---surface-variants K also emit K cosmetic variants (same gold) per base item
-```
-
 A run with `--reps 20 --distractor --surface-variants 3` over difficulties 1–6 and all
-four families is ~2,000 items. At `--samples 1` that's ~2,000 model calls.
+eleven families is ~5,000 items. At `--samples 1` that's ~5,000 model calls.
+
 
 ## The run knobs (`run`)
 
@@ -212,28 +220,38 @@ relying on the images.
 - **Sequences are the noisiest family.** "Next term" can admit more than one rule; the
   generators use enough terms to make the intended rule the simplest fit, but treat this
   family as a soft signal. Its difficulty axis is a rule-complexity *tier*, not a step
-  count, so compare it within-family rather than against the other three.
+  count, so compare it within-family rather than against numeric families.
 - **Grading is exact-match** on a parsed `ANSWER:` line with fallbacks. If a model
   refuses the format, it will look wrong; spot-check a few raw responses in the DB
-  (`SELECT raw FROM responses LIMIT 5`) the first time you run a new model.
-- The four numeric families measure **compositional / robustness reasoning**;
-  `knights_knaves` and `logic_grid` add **deductive / constraint-satisfaction** load
-  that scales steeply (8 islanders = 2⁸ assignments; 7 floors = 7! arrangements) and
-  is where strong reasoners separate from pattern-matchers. They remain complementary
-  to, not a replacement for, frontier benchmarks (ARC-AGI-2, GPQA-Diamond, etc.).
+  (`SELECT raw FROM responses LIMIT 5`) the first time you run a new model. `grading_fragility`
+  tells you how much the reported score depends on the fallback path.
+- The four numeric families (`arithmetic`, `state_tracking`, `ordering`, `sequences`) are
+  **robustness probes**: they test compositional and perturbation-resilient reasoning, not
+  just accuracy. `retroactive_edit`, `multi_turn_inject`, `composed`, and `redefined_ops`
+  add dynamic, multi-turn, and counterfactual execution load.
+- The CSP families (`knights_knaves`, `logic_grid`, `unsat_csp`) add **deductive /
+  constraint-satisfaction** load that scales steeply (8 islanders = 2⁸ assignments;
+  7 floors = 7! arrangements) and is where strong reasoners separate from pattern-matchers.
+  `unsat_csp` deliberately includes controlled ill-posed instances; the meaningful metric
+  there is the **confabulation rate** (concrete answers to `UNDETERMINED`/`NO_SOLUTION`).
 - **CSP difficulty is bounded by gold-verification cost, not by the model.** Uniqueness
-  is proven by brute force at build time, so the caps above keep generation honest. If
-  you want harder puzzles than the caps allow, raise `FAMILY_MAX_DIFF` *and* the
-  verifier's search will need to scale with it (it's exponential/factorial).
+  (or controlled non-uniqueness for `unsat_csp`) is proven by brute force at build time,
+  so the caps above keep generation honest. If you want harder puzzles than the caps allow,
+  raise `FAMILY_MAX_DIFF` *and* the verifier's search will need to scale with it
+  (it's exponential/factorial).
 
 ## Extending it
 
 Add a family in `generators.py`:
 
 1. write `gen_yourfamily(difficulty, structure_seed, surface_seed, distractor)` returning
-   `(prompt, gold, answer_type, choices)`. Compute the gold *in code*.
-2. register it in `GENERATORS`, and add it to `SUPPORTS_DISTRACTOR` / `SUPPORTS_SURFACE`
-   if it can hold its gold fixed under those perturbations.
+   `(prompt, gold, answer_type, choices)` — or `(prompt, gold, answer_type, choices, turns)`
+   for multi-turn families. Compute the gold *in code*.
+2. add a matching `_verify_yourfamily(prompt, gold)` in `_VERIFIERS` so `verify_gold` can
+   re-derive the answer from the prompt text independently.
+3. register it in `GENERATORS`, and add it to `SUPPORTS_DISTRACTOR` / `SUPPORTS_SURFACE`
+   if it can hold its gold fixed under those perturbations. Set `FAMILY_MAX_DIFF` if the
+   family uses a discrete tier or brute-forced structure.
 
 Everything else (storage, running, metrics, charts) picks it up automatically.
 
