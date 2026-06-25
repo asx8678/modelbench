@@ -43,6 +43,38 @@ def test_chance_baseline_values_for_known_families():
     assert metrics._chance_baseline("logic_grid", 5) == pytest.approx(1.0 / 7)
 
 
+def test_chance_correction_recompute_no_model_calls():
+    # yvr.2: build a dataset (no model calls), fill all responses with the
+    # true gold so acc == 1, and assert acc_above_chance is well-defined
+    # and bounded. Also assert the per-family chance values match the
+    # documented baseline formula.
+    families = ["ordering", "knights_knaves", "logic_grid", "unsat_csp",
+                "composed", "arithmetic", "state_tracking"]
+    con, items = _dataset(families, 1, 4, 1)
+    for p in items:
+        _store(con, "r", p.item_id, 0, f"ANSWER: {p.gold}", p.gold, 1)
+    res = metrics.compute(con, "r")
+    # acc_above_chance <= accuracy for every family.
+    for fam, acc in res["accuracy_by_family"].items():
+        if acc is None:
+            continue
+        assert res["acc_above_chance"][fam] <= acc + 1e-9
+    # Chance baselines match the documented formula.
+    for fam, baseline in res["chance_baseline"].items():
+        if fam == "knights_knaves":
+            # Set answer over 2^n assignments; chance averaged across
+            # difficulties is bounded by 1/2^(min_diff+2).
+            assert 0.0 < baseline <= 0.5
+        elif fam in ("ordering", "logic_grid", "composed"):
+            # Averaged across difficulties 1..4: 1/(d+2) for d in 1..4
+            assert 0.15 < baseline < 0.4
+        elif fam == "unsat_csp":
+            assert baseline == pytest.approx(0.25)
+        else:
+            assert baseline == 0.0
+
+
+
 def test_zero_chance_families_have_zero_baseline():
     for fam in ["arithmetic", "state_tracking", "sequences",
                 "retroactive_edit", "multi_turn_inject"]:
