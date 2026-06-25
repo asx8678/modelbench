@@ -114,3 +114,32 @@ def test_grading_fragility_zero_when_marker_and_fallback_agree():
         _store(con, "r", p.item_id, 0, f"ANSWER: {p.gold}", p.gold, 1)
     res = metrics.compute(con, "r")
     assert res["grading_fragility"] == pytest.approx(0.0)
+
+def test_false_undetermined_rate_bounds_and_counts_unique_items():
+    # false_undetermined_rate should only consider items whose gold is NOT
+    # UNDETERMINED / NO_SOLUTION, and should count sample-0 parsed answers that
+    # ARE UNDETERMINED / NO_SOLUTION.
+    con, items = _dataset(["unsat_csp"], 3, 3, 2)
+    run_id = "fudr"
+    for p in items:
+        _store(con, run_id, p.item_id, 0, f"ANSWER: {p.gold}", p.gold, 1)
+        _store(con, run_id, p.item_id, 1, f"ANSWER: {p.gold}", p.gold, 1)
+    res = metrics.compute(con, run_id)
+    assert "false_undetermined_rate" in res
+    assert res["false_undetermined_rate"] == pytest.approx(0.0)
+    # Now inject a false UNDETERMINED on one unique item.
+    unique_iid = next(i for i, m in _meta_items(con, run_id)
+                      if m["gold"] not in ("UNDETERMINED", "NO_SOLUTION"))
+    _store(con, run_id, unique_iid, 0, "ANSWER: UNDETERMINED", "UNDETERMINED", 0)
+    res2 = metrics.compute(con, run_id)
+    unique_count = sum(1 for _, m in _meta_items(con, run_id)
+                       if m["gold"] not in ("UNDETERMINED", "NO_SOLUTION"))
+    assert res2["false_undetermined_rate"] == pytest.approx(1.0 / unique_count)
+
+
+def _meta_items(con, run_id):
+    rows = metrics._fetch(con, run_id)
+    meta = {}
+    for r in rows:
+        meta.setdefault(r["item_id"], {k: r[k] for k in ("family", "difficulty", "probe", "grp", "gold", "answer_type", "choices")})
+    return list(meta.items())

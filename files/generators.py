@@ -941,7 +941,8 @@ def gen_unsat_csp(difficulty, structure_seed, surface_seed, distractor):
                     break
     chosen = _drop_redundant(chosen, lambda kept: len(_kk_all_solutions(slots, kept)) == 1)
 
-    # Decide: keep unique (40%), drop clue (30%), inject contradiction (30%).
+    # Decide: keep unique (30%), drop clue (30%), inject contradiction (30%),
+    # over-constrained but still unique (10%).
     r = rs.random()
     if r < 0.3 and len(chosen) > 1:
         drop_idx = rs.randrange(len(chosen))
@@ -962,8 +963,21 @@ def gen_unsat_csp(difficulty, structure_seed, surface_seed, distractor):
             if contradiction:
                 break
         ill_clues = chosen + [contradiction] if contradiction else chosen
-    else:
+    elif r < 0.9:
         ill_clues = chosen
+    else:
+       # Over-constrained but still unique: add redundant clues that preserve
+       # the unique solution until no more can be added.
+       over = list(chosen)
+       extra_candidates = [st for st in pool if st not in over]
+       rs.shuffle(extra_candidates)
+       for st in extra_candidates:
+           if not _kk_consistent(st, typ):
+               continue
+           trial = over + [st]
+           if len(_kk_all_solutions(slots, trial)) == 1:
+               over.append(st)
+       ill_clues = over
 
     # Compute gold from actual solution count — single source of truth.
     sols = _kk_all_solutions(slots, ill_clues)

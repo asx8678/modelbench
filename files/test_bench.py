@@ -142,6 +142,20 @@ def test_unsat_csp_verifier_rejects_undetermined_on_invariant_slot():
     assert generators._verify_unsat_csp(prompt, gold) is True
     assert generators._verify_unsat_csp(prompt, "UNDETERMINED") is False
 
+def test_unsat_csp_over_constrained_branch_is_determinate():
+    # bench-le7.3: the 10% over-constrained branch adds redundant clues but must
+    # still leave exactly one solution, so the gold is a determinate knight/knave.
+    for seed in (2, 12, 14):
+        prompt, gold, _atype, _choices = generators.gen_unsat_csp(2, seed, 0, False)
+        names, stmts = generators._kk_parse(prompt)
+        sols = generators._kk_all_solutions(names, stmts)
+        assert len(sols) == 1, f"seed={seed}: expected unique solution, got {len(sols)}"
+        assert gold in ("knight", "knave"), f"seed={seed}: gold={gold}"
+        query_name = re.search(r"Is (\w+) a knight or a knave\?", prompt).group(1)
+        values = {s.get(query_name) for s in sols}
+        assert len(values) == 1
+        assert gold == ("knight" if next(iter(values)) else "knave")
+
 
 def test_csp_puzzles_are_minimally_constrained():
     # Dropping any one clue should destroy uniqueness — proof the puzzle has no

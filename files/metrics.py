@@ -349,6 +349,15 @@ def compute(con, run_id):
                 confab_count += 1
     confabulation_rate = float(confab_count / len(ill_posed)) if ill_posed else None
 
+    # ---- false undetermined rate: unique items answered as UNDETERMINED or NO_SOLUTION
+    unique = [i for i in base if meta[i]["gold"] not in ("UNDETERMINED", "NO_SOLUTION")]
+    false_undet_count = 0
+    for i in unique:
+        parsed = s0_parsed.get(i)
+        if parsed in ("UNDETERMINED", "NO_SOLUTION"):
+            false_undet_count += 1
+    false_undetermined_rate = float(false_undet_count / len(unique)) if unique else None
+
     return {
         "run_id": run_id, "n_items": n_items, "samples_per_item": nsamples,
         "coverage": coverage,
@@ -361,6 +370,8 @@ def compute(con, run_id):
         "degradation": {f: dict(d) for f, d in curve.items()},
         "distractibility": distract, "invariance": invariance,
         "calibration": calibration, "passk": passk,
+        "confabulation_rate": confabulation_rate,
+        "false_undetermined_rate": false_undetermined_rate,
         "behavioral_uncertainty": behavioral_uncertainty,
     }
 
