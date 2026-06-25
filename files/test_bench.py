@@ -215,20 +215,23 @@ def test_composed_gold_verifies_end_to_end():
     p = generators._mk("composed", 3, 7, 0, False, "base", "g")
     assert generators.verify_gold(p) is True
     # Sanity: prompt has all three stages and >=3 dependency hops.
-    assert "Stage 1:" in p.prompt and "Stage 2:" in p.prompt and "Stage 3:" in p.prompt
-    # The choices come from the ordering names.
-    assert p.gold in p.choices
+    assert "Stage 1:" in p.prompt and "Stage 2:" in p.prompt and "Stage 3" in p.prompt
+    # Gold is the raw integer from the arithmetic hop; the ordering hop
+    # is now a distractor, so the answer space is the integer range
+    # (no modulo wrap into Stage 3 names).
+    assert p.answer_type == "int"
+    assert int(p.gold) >= 0
 
 
 def test_composed_perturb_hop_a_changes_final_gold():
-    # Perturbing the first hop (knights count) must propagate and change the final gold.
+    # Perturbing the first hop (knights count) must propagate and change
+    # the final gold. Gold is now the raw integer from Stage 2; a
+    # different knight count yields a different integer (no wrap).
     p = generators._mk("composed", 3, 7, 0, False, "base", "g")
-    orig_kk = p.prompt
-    # Build a synthetic variant with the same ordering/arithmetic but a different
-    # knight count by re-seeding hop A while holding hops B/C fixed.
     parsed = generators._composed_parse_hops(p.prompt)
     names, stmts = generators._kk_parse(parsed["knights_prompt"])
-    # Flip the type of the first speaker in every statement: changes the knight count.
+    # Flip the type of the first speaker in every statement: changes the
+    # knight count.
     flipped = []
     for st in stmts:
         if st[0] == "ABS":
@@ -237,8 +240,8 @@ def test_composed_perturb_hop_a_changes_final_gold():
             flipped.append((st[0], st[1], st[2], st[3], not st[4]))
     sols = generators._kk_all_solutions(names, flipped)
     if len(sols) != 1:
-        # If flipping breaks uniqueness, just verify that a different hop-A seed
-        # usually changes the final gold by sampling.
+        # If flipping breaks uniqueness, just verify that a different
+        # hop-A seed usually changes the final gold by sampling.
         seen = {p.gold}
         for s in range(1, 30):
             q = generators._mk("composed", 3, s, 0, False, "base", "g")
@@ -259,9 +262,9 @@ def test_composed_perturb_hop_a_changes_final_gold():
                 if new_knight_count != sum(1 for v in generators._kk_all_solutions(names, stmts)[0].values() if v):
                     break
     arith_total = generators._verify_arithmetic_raw(parsed["arith_prompt"], new_knight_count)
-    names_order, _ = generators._verify_order_raw(parsed["order_prompt"], parsed["order_query"])
-    new_gold = names_order[(arith_total - 1) % len(names_order)]
-    assert new_gold != p.gold, (p.gold, new_gold)
+    # Gold is the raw integer; any 1-unit knight-count change propagates.
+    assert int(arith_total) != int(p.gold), (p.gold, arith_total)
+
 
 # ------------------------------------------------------------------ grading (#1)
 def test_confidence_value_not_used_as_answer():

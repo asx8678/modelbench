@@ -551,56 +551,66 @@ def gen_logic_grid(difficulty, structure_seed, surface_seed, distractor):
 # query. The prompt embeds every hop so each can be verified independently.
 
 def _composed_parse_hops(prompt):
-    """Return dict with keys: knights_prompt, arith_prompt, order_prompt, order_query."""
+    """Return dict with keys: knights_prompt, arith_prompt, arith_subj.
+
+    Stage 3 (the ordering block) is a distractor/red-herring that no
+    longer contributes to the answer; the final gold is the raw
+    integer from Stage 2. The parser therefore only extracts the
+    knights and arithmetic stages.
+    """
     m = re.search(
-        r"Stage 1: On an island(.+?)\n+Stage 2:\s*(.+?)\n+(.+?)\n+Stage 3:\s*(.+?)\n+(.*)",
+        r"Stage 1: On an island(.+?)\n+Stage 2:\s*(.+?)\n+",
         prompt, re.S,
     )
     if not m:
         return None
     knights_block = "On an island" + m.group(1).strip()
     arith_subj = m.group(2).strip()
-    arith_block = m.group(3).strip()
-    order_block = m.group(4).strip()
-    rest = m.group(5).strip()
-    qm = re.search(r"Who is the ([^?]+)\?", rest)
-    if not qm:
-        return None
+    # The arithmetic block is everything from after the subject line
+    # up to either the next "Stage" marker or the "Use this number"
+    # sentence (whichever comes first). The subject line is the
+    # first sentence of Stage 2; the remaining sentences are the
+    # arithmetic updates.
+    m2 = re.search(
+        r"Stage 2:\s*" + re.escape(arith_subj) + r"\s*(.+?)(?:\n+Stage|\n+What is it|$)",
+        prompt, re.S,
+    )
+    if not m2:
+        # Fallback: just take the rest of Stage 2 as the body.
+        body = prompt.split(arith_subj, 1)[1] if arith_subj in prompt else ""
+    else:
+        body = m2.group(1).strip()
     return {
         "knights_prompt": knights_block,
-        "arith_prompt": arith_subj + " " + arith_block,
+        "arith_prompt": arith_subj + " " + body,
         "arith_subj": arith_subj,
-        "order_prompt": order_block + "\n" + rest,
-        "order_query": qm.group(1),
     }
+
 
 
 def _verify_composed(prompt, gold):
     parsed = _composed_parse_hops(prompt)
     if not parsed:
         return False
-
-    # Hop A: re-derive knight count from the embedded knights prompt.
-    names, stmts = _kk_parse(parsed["knights_prompt"])
-    if not names or not stmts:
+    # Re-derive the arithmetic total from Stage 2 starting from the
+    # knight count in Stage 1. The final gold is the raw integer
+    # (no modulo wrap into Stage 3).
+    kk_prompt = parsed["knights_prompt"]
+    kk_names, kk_stmts = _kk_parse(kk_prompt)
+    if not kk_names or not kk_stmts:
         return False
-    sols = _kk_all_solutions(names, stmts)
+    sols = _kk_all_solutions(kk_names, kk_stmts)
     if len(sols) != 1:
         return False
     knight_count = sum(1 for v in sols[0].values() if v)
-
-    # Hop B: run the arithmetic chain starting from the knight count.
     arith_total = _verify_arithmetic_raw(parsed["arith_prompt"], knight_count)
     if arith_total is None:
         return False
-
-    # Hop C: use the arithmetic result as a 1-based index into the ordering.
-    names_order, gold_order = _verify_order_raw(parsed["order_prompt"], parsed["order_query"])
-    if names_order is None or not names_order:
+    try:
+        return int(gold) == int(arith_total)
+    except (TypeError, ValueError):
         return False
-    idx = (arith_total - 1) % len(names_order)
-    final = names_order[idx]
-    return str(final) == str(gold)
+
 
 
 def _verify_arithmetic_raw(prompt, start):
@@ -721,17 +731,20 @@ def gen_composed(difficulty, structure_seed, surface_seed, distractor):
     arith_prompt = " ".join(arith_clauses)
     arith_result = current
 
-    # Hop C: ordering whose queried rank is determined by the arithmetic result.
+    # Hop C: ordering hop included as a distractor/red-herring. The
+    # final answer is the raw integer from Hop B (arithmetic), NOT a
+    # name lookup into the ordering. Dropping the `% len(names)` modulo
+    # is critical: any 1-unit drift in the arithmetic hop propagates
+    # to the final integer instead of being masked by wrap-around.
     order_diff = max(1, difficulty)
     order_struct = rs.randint(0, 2 ** 16)
     order_prompt, _order_gold, _atype, names = gen_order(order_diff, order_struct, 0, False)
     order_clauses = order_prompt.split(" Who is the ")[0]
-    idx = (arith_result - 1) % len(names)
-    rank_word = _ordinal(idx + 1)
-    # Determine the superlative from the order prompt.
-    mq = re.search(r"Who is the \w+ (\w+)\?", order_prompt)
-    sup = mq.group(1) if mq else "tallest"
-    gold = names[idx]
+
+    # Final gold: the raw integer from Hop B (carried through all
+    # hops). Answer space is the full integer range, not a wrapped
+    # index into the ordering.
+    gold = str(arith_result)
 
     prompt = (
         "Stage 1: " + kk_block + "\n"
@@ -740,11 +753,11 @@ def gen_composed(difficulty, structure_seed, surface_seed, distractor):
         "Stage 2: " + arith_prompt + "\n"
         f"How many {arith_item} does {arith_name} have now? "
         "(Use this number in the next stage.)\n\n"
-        "Stage 3: " + order_clauses + "\n"
-        "Taking the result from Stage 2 as a position, who is the person at that rank?\n"
-        f"Who is the {rank_word} {sup}?"
+        "Stage 3 (distractor, not used for the answer): " + order_clauses + "\n"
+        "Stage 2's result is the answer. What is it?"
     )
-    return prompt, gold, "choice", names
+    return prompt, gold, "int", None
+
 
 
 
