@@ -58,6 +58,11 @@ def parse_answer(text: str, answer_type: str, choices: Optional[List[str]] = Non
     if marker_src == "marker":
         parsed = None
         if answer_type == "int":
+            # Deliberate asymmetry with the fallback below: an ANSWER: marker
+            # LEADS with the answer ("ANSWER: 12 apples"), so take the first int;
+            # free prose CONCLUDES with it, so the fallback takes the last int.
+            # grading_fragility() measures when these disagree, and metrics'
+            # strict-accuracy / fallback_reliance quantify the consequence.
             nums = _INT.findall(marker.replace(",", ""))
             if nums:
                 parsed = str(int(nums[0]))
@@ -86,7 +91,9 @@ def parse_answer(text: str, answer_type: str, choices: Optional[List[str]] = Non
     if strict_mode:
         return None, "none"
 
-    # Fallbacks
+    # Fallbacks. No ANSWER: marker: scan the whole response. For ints the
+    # conclusion trails, so take the LAST int (vs the marker's first); see the
+    # asymmetry note above.
     if answer_type == "int":
         nums = _INT.findall(_strip_confidence(text).replace(",", ""))
         if nums:

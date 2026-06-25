@@ -213,6 +213,10 @@ def write_csv(run_results, labels, outpath):
         w.writerow(["model", "metric", "family", "difficulty", "value"])
         for res, lab in zip(run_results, labels):
             w.writerow([lab, "overall_accuracy", "", "", round(res["overall_accuracy"], 4)])
+            if res.get("overall_accuracy_strict") is not None:
+                w.writerow([lab, "overall_accuracy_strict", "", "", round(res["overall_accuracy_strict"], 4)])
+            if res.get("fallback_reliance") is not None:
+                w.writerow([lab, "fallback_reliance", "", "", round(res["fallback_reliance"], 4)])
             for fam, a in res["accuracy_by_family"].items():
                 w.writerow([lab, "family_accuracy", fam, "", round(a, 4)])
             for fam, d in res["degradation"].items():
@@ -263,6 +267,16 @@ def _acc_above_chance_cell(r, fam):
     v = r.get("acc_above_chance", {}).get(fam)
     return f"{v:.3f}" if v is not None else "—"
 
+def _strict_cell(r):
+    s = r.get("overall_accuracy_strict")
+    return f"{s:.3f}" if s is not None else "—"
+
+
+def _fallback_cell(r):
+    fr = r.get("fallback_reliance")
+    return f"{fr:.3f}" if fr is not None else "—"
+
+
 def _coverage_cell(r):
     c = r["coverage"]
     return f"{c['coverage']:.3f}" if c["errored"] else "1.000"
@@ -285,9 +299,11 @@ def _passk_cell(r):
 def write_markdown(run_results, labels, charts, outpath):
     L = ["# Reasoning benchmark report", ""]
     L.append(_md_table(
-        ["model", "overall acc", "coverage", "confabulation", "answer-flip rate", "ECE",
+        ["model", "overall acc", "strict acc", "fallback-reliance", "coverage",
+         "confabulation", "answer-flip rate", "ECE",
          "acc above chance", "pass@1 → maj@k → oracle"],
-        [[lab, f"{r['overall_accuracy']:.3f}", _coverage_cell(r), _confab_cell(r),
+        [[lab, f"{r['overall_accuracy']:.3f}", _strict_cell(r), _fallback_cell(r),
+          _coverage_cell(r), _confab_cell(r),
           _flip_cell(r), _ece_cell(r), _above_chance_cell(r), _passk_cell(r)]
          for r, lab in zip(run_results, labels)]))
     L += ["", "## Accuracy above chance by family", ""]

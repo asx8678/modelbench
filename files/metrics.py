@@ -183,6 +183,36 @@ def compute(con, run_id):
     base_ok = [s0_correct[i] for i in base if i in s0_correct]
     overall = float(np.mean(base_ok)) if base_ok else 0.0
 
+    # ---- strict (marker-only) accuracy: gives grading-fragility teeth (E4).
+    # The lenient grader can rescue a format-noncompliant response via the
+    # last-integer / trailing-choice fallback. Strict accuracy counts only
+    # responses whose ANSWER: marker parses; fallback_reliance is the share of
+    # ANSWERED base items graded correct ONLY because of that rescue -- a high
+    # value means the headline reflects format luck, not reasoning.
+    def _choices_of(i):
+        ch = meta[i].get("choices")
+        if isinstance(ch, str) and ch:
+            return ch.split("|")
+        return ch or None
+    s0_raw = {}
+    for i in base:
+        for idx, _c, _p, rw in samples[i]:
+            if idx == 0:
+                s0_raw[i] = rw
+                break
+    strict_correct = {}
+    for i in base:
+        if i not in s0_correct:               # errored / unanswered: not scored either way
+            continue
+        raw = s0_raw.get(i)
+        pm = _parse_marker_only(raw, meta[i]["answer_type"], _choices_of(i)) if raw else None
+        strict_correct[i] = _is_correct(pm, meta[i]["gold"], meta[i]["answer_type"])
+    strict_base = [strict_correct[i] for i in base if i in strict_correct]
+    overall_strict = float(np.mean(strict_base)) if strict_base else 0.0
+    fallback_dependent = sum(1 for i in base
+                             if s0_correct.get(i) and not strict_correct.get(i, False))
+    fallback_reliance = float(fallback_dependent / answered) if answered else None
+
     # ---- degradation curve + Wilson CI: accuracy vs difficulty, per family
     curve = defaultdict(dict)
     bucket = defaultdict(lambda: defaultdict(list))
@@ -384,6 +414,8 @@ def compute(con, run_id):
         "run_id": run_id, "n_items": n_items, "samples_per_item": nsamples,
         "coverage": coverage,
         "overall_accuracy": overall, "accuracy_by_family": fam_acc,
+        "overall_accuracy_strict": overall_strict,
+        "fallback_reliance": fallback_reliance,
         "chance_baseline": chance_baseline,
         "acc_above_chance": acc_above_chance,
         "frontier_headroom": frontier_headroom,
@@ -406,7 +438,12 @@ def print_summary(res):
     if cov["errored"]:
         print(f"coverage: {cov['answered']}/{cov['n_items']} answered "
               f"({cov['errored']} errored, excluded from accuracy)")
-    print(f"overall single-shot accuracy: {res['overall_accuracy']:.3f}\n")
+    print(f"overall single-shot accuracy: {res['overall_accuracy']:.3f}")
+    if res.get("overall_accuracy_strict") is not None:
+        fr = res.get("fallback_reliance")
+        tail = f"   fallback-reliance {fr:.3f}" if fr is not None else ""
+        print(f"  strict (marker-only) accuracy: {res['overall_accuracy_strict']:.3f}{tail}")
+    print()
     print("accuracy by family:")
     for f, a in sorted(res["accuracy_by_family"].items()):
         print(f"  {f:16s} {a:.3f}")

@@ -113,6 +113,29 @@ def test_grading_fragility_zero_when_marker_and_fallback_agree():
     res = metrics.compute(con, "r")
     assert res["grading_fragility"] == pytest.approx(0.0)
 
+def test_strict_accuracy_and_fallback_reliance():
+    # bench-lzl / E4: a correct grade earned ONLY via the lenient last-integer
+    # fallback (no ANSWER: marker) must count toward fallback_reliance and must
+    # NOT count toward strict (marker-only) accuracy.
+    con, items = _dataset(["arithmetic"], 1, 2, 1)
+    p = items[0]
+    # stored lenient grade is correct, but the raw has no ANSWER: marker
+    _store(con, "r", p.item_id, 0, f"the total comes to {p.gold}.", p.gold, 1)
+    res = metrics.compute(con, "r")
+    assert res["overall_accuracy"] == pytest.approx(1.0)        # lenient: rescued
+    assert res["overall_accuracy_strict"] == pytest.approx(0.0)  # strict: no marker
+    assert res["fallback_reliance"] == pytest.approx(1.0)
+
+
+def test_fallback_reliance_zero_when_marker_present():
+    con, items = _dataset(["arithmetic"], 2, 2, 1)
+    for p in items:
+        _store(con, "r", p.item_id, 0, f"ANSWER: {p.gold}", p.gold, 1)
+    res = metrics.compute(con, "r")
+    assert res["overall_accuracy_strict"] == pytest.approx(res["overall_accuracy"])
+    assert res["fallback_reliance"] == pytest.approx(0.0)
+
+
 def test_false_undetermined_rate_bounds_and_counts_unique_items():
     # false_undetermined_rate should only consider items whose gold is NOT
     # UNDETERMINED / NO_SOLUTION, and should count sample-0 parsed answers that

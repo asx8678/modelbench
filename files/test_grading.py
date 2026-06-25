@@ -113,3 +113,12 @@ def test_parse_answer_returns_tuple():
     parsed, src = parse_answer("no answer here", "int")
     assert parsed is None
     assert src == "none"
+
+
+def test_marker_takes_first_int_fallback_takes_last_int():
+    # bench-lzl / E4: the marker/fallback int asymmetry is deliberate and documented.
+    # A marker LEADS with the answer (first int); free prose CONCLUDES with it (last int).
+    parsed, src = parse_answer("ANSWER: 12 apples then 99 total", "int")
+    assert (parsed, src) == ("12", "marker")
+    parsed, src = parse_answer("first I had 12, ending with 99", "int")
+    assert (parsed, src) == ("99", "fallback")
