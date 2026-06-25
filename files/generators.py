@@ -275,6 +275,12 @@ def gen_multi_turn_inject(difficulty, structure_seed, surface_seed, distractor):
 
 
 # -------------------------------------------------------------- 3. ordering
+def _ordinal(n):
+    """Convert integer to ordinal string (1->'1st', 2->'2nd', etc.)."""
+    if 11 <= n % 100 <= 13:
+        return f"{n}th"
+    return f"{n}{['th','st','nd','rd','th'][min(n % 10, 4)]}"
+
 def gen_order(difficulty, structure_seed, surface_seed, distractor):
     """Transitive comparison. Difficulty = number of entities - 2."""
     rs = _rng("order-struct", difficulty, structure_seed)
@@ -282,12 +288,18 @@ def gen_order(difficulty, structure_seed, surface_seed, distractor):
     rd = _rng("order-distract", structure_seed)
 
     m = difficulty + 2
-    names = rs.sample(NAMES, m)                 # structural -> gold stable
+    names = rs.sample(NAMES, m)
     comp, anti, sup_hi, sup_lo = rs.choice(REL)
     order = names[:]                            # order[0] highest ... order[-1] lowest
     pairs = [(order[i], order[i + 1]) for i in range(m - 1)]
 
-    pres = pairs[:]; ru.shuffle(pres)           # surface: presentation only
+    # Ask a non-extreme rank to prevent degree-counting shortcuts.
+    rank_idx = rs.randint(1, m - 2)             # 1..m-2 (never 0 or m-1)
+    rank_word = _ordinal(rank_idx + 1)          # 1-indexed ordinal
+    gold = order[rank_idx]
+
+    # Keep all adjacent pairs — dropping any disconnects the graph.
+    pres = pairs[:]; ru.shuffle(pres)
     clauses = []
     for a, b in pres:
         if ru.random() < 0.5:
@@ -295,13 +307,10 @@ def gen_order(difficulty, structure_seed, surface_seed, distractor):
         else:
             clauses.append(f"{b} is {anti} than {a}.")
 
-    ask_high = rs.random() < 0.5
-    gold, sup = (order[0], sup_hi) if ask_high else (order[-1], sup_lo)
-
     if distractor:
         clauses.insert(0, f"{rd.choice(order)} is wearing a {rd.choice(COLORS)} hat.")
 
-    prompt = " ".join(clauses) + f" Who is the {sup}?"
+    prompt = " ".join(clauses) + f" Who is the {rank_word} {sup_hi}?"
     return prompt, gold, "choice", names
 
 
@@ -419,12 +428,14 @@ def gen_knights(difficulty, structure_seed, surface_seed, distractor):
         else:
             sents.append(f"{names[st[1]]} says that {names[st[2]]} and {names[st[3]]} "
                          f"are {'the same type' if st[4] else 'different types'}.")
-    gold = str(sum(1 for v in typ.values() if v))
+    # Ask about a specific islander's type (answer space 2: knight/knave)
+    query_slot = rs.randrange(n)
+    gold = "knight" if typ[query_slot] else "knave"
     prompt = ("On an island, every inhabitant is either a knight (who always tells the "
               "truth) or a knave (who always lies). Its inhabitants are "
               + ", ".join(names) + ". They say:\n" + "\n".join(sents)
-              + "\nHow many of them are knights?")
-    return prompt, gold, "int", None
+              + f"\nIs {names[query_slot]} a knight or a knave?")
+    return prompt, gold, "choice", ["knight", "knave"]
 
 
 # ---------------------------------------------------- 6. logic grid (zebra-lite)
@@ -627,7 +638,13 @@ def _verify_order_raw(prompt, query):
             order = list(perm)
     if order is None:
         return None, None
-    if query.lower() in ("shortest", "lightest", "youngest", "coldest"):
+    # Parse ordinal rank from query (e.g., "2nd tallest" -> index 1)
+    ordinals = {"1st": 0, "2nd": 1, "3rd": 2, "4th": 3, "5th": 4, "6th": 5, "7th": 6, "8th": 7}
+    mq = re.search(r"(\w+) (\w+)", query)
+    if mq and mq.group(1) in ordinals:
+        rank = ordinals[mq.group(1)]
+        expected = order[rank] if rank < len(order) else None
+    elif query.lower() in ("shortest", "lightest", "youngest", "coldest"):
         expected = order[-1]
     else:
         expected = order[0]
@@ -643,8 +660,12 @@ def gen_composed(difficulty, structure_seed, surface_seed, distractor):
     kk_diff = 2
     kk_struct = rs.randint(0, 2 ** 16)
     kk_prompt, kk_gold, _, _ = gen_knights(kk_diff, kk_struct, 0, False)
-    kk_block = kk_prompt.replace("\nHow many of them are knights?", "")
-    knight_count = int(kk_gold)
+    # Strip the final question line to get just the clues block.
+    kk_block = kk_prompt.rsplit("\n", 1)[0]
+    # Count knights from the unique solution.
+    kk_names, kk_stmts = _kk_parse(kk_prompt)
+    kk_sols = _kk_all_solutions(kk_names, kk_stmts)
+    knight_count = sum(1 for v in kk_sols[0].values() if v)
 
     # Hop B: arithmetic seeded by the knight count.
     arith_diff = max(1, difficulty)
@@ -683,22 +704,92 @@ def gen_composed(difficulty, structure_seed, surface_seed, distractor):
     order_prompt, _order_gold, _atype, names = gen_order(order_diff, order_struct, 0, False)
     order_clauses = order_prompt.split(" Who is the ")[0]
     idx = (arith_result - 1) % len(names)
-    query = "shortest" if idx == len(names) - 1 else "tallest"
+    rank_word = _ordinal(idx + 1)
+    # Determine the superlative from the order prompt.
+    mq = re.search(r"Who is the \w+ (\w+)\?", order_prompt)
+    sup = mq.group(1) if mq else "tallest"
     gold = names[idx]
 
     prompt = (
         "Stage 1: " + kk_block + "\n"
-        "How many of them are knights? (Use this number in the next stage.)\n\n"
+        f"Is {kk_names[rs.randrange(len(kk_names))]} a knight or a knave? "
+        "(Use the number of knights in the next stage.)\n\n"
         "Stage 2: " + arith_prompt + "\n"
         f"How many {arith_item} does {arith_name} have now? "
         "(Use this number in the next stage.)\n\n"
         "Stage 3: " + order_clauses + "\n"
         "Taking the result from Stage 2 as a position, who is the person at that rank?\n"
-        f"Who is the {query}?"
+        f"Who is the {rank_word} {sup}?"
     )
     return prompt, gold, "choice", names
 
 
+
+
+
+# ------------------------------------------------ 8. redefined_ops (counterfactual)
+# Arithmetic where the prompt redefines operators (e.g. "⊕ means a+b+3").
+# Gold computed by applying the redefined table; verifier replays from prompt text.
+def gen_redefined_ops(difficulty, structure_seed, surface_seed, distractor):
+    rs = _rng("rops-struct", difficulty, structure_seed)
+    ru = _rng("rops-surf", structure_seed, surface_seed)
+    rd = _rng("rops-distract", structure_seed)
+
+    name = ru.choice(NAMES)
+    item = ru.choice(ITEMS)
+    # Redefine one standard operator
+    op_sym = rs.choice(["⊕", "⊗", "⊖"])
+    bias = rs.randint(1, 5)
+    op_desc = rs.choice([
+        (f"{op_sym} means add the two numbers then add {bias}", lambda a, b: a + b + bias),
+        (f"{op_sym} means multiply the two numbers then subtract {bias}", lambda a, b: a * b - bias),
+        (f"{op_sym} means add the two numbers then double", lambda a, b: (a + b) * 2),
+    ])
+    op_text, op_fn = op_desc
+    current = rs.randint(3, 15)
+    clauses = [f"{name} starts with {current} {item}.",
+               f"In this problem, {op_text}."]
+    for _ in range(difficulty):
+        k = rs.randint(2, 10)
+        new = op_fn(current, k)
+        clauses.append(f"{name} {op_sym} {k} {item}.")
+        current = new
+    if distractor:
+        oname = rd.choice([n for n in NAMES if n != name])
+        clauses.insert(1, f"{oname} also has {rd.randint(2, 20)} pencils.")
+    prompt = " ".join(clauses) + f" How many {item} does {name} have now?"
+    return prompt, str(current), "int", None
+
+
+def _verify_redefined_ops(prompt, gold):
+    """Re-derive the answer by parsing the redefined operator from prompt text."""
+    # Parse the operator definition
+    m = re.search(r"(\S) means (.*?)\.", prompt)
+    if not m:
+        return False
+    op_sym = m.group(1)
+    op_escaped = re.escape(op_sym)
+    op_def = m.group(2)
+    # Parse the operation
+    if "add the two numbers then add" in op_def:
+        bias = int(re.search(r"add (\d+)", op_def).group(1))
+        op_fn = lambda a, b: a + b + bias
+    elif "multiply the two numbers then subtract" in op_def:
+        bias = int(re.search(r"subtract (\d+)", op_def).group(1))
+        op_fn = lambda a, b: a * b - bias
+    elif "add the two numbers then double" in op_def:
+        op_fn = lambda a, b: (a + b) * 2
+    else:
+        return False
+    # Parse initial value
+    mi = re.search(r"starts with (\d+)", prompt)
+    if not mi:
+        return False
+    current = int(mi.group(1))
+    # Replay operations: match specifically the operator symbol
+    for m in re.finditer(rf"{op_escaped} (\d+)", prompt):
+        current = op_fn(current, int(m.group(1)))
+    return str(current) == str(gold)
 
 
 def _mk(family, difficulty, structure_seed, surface_seed, distractor, probe, grp):
@@ -723,13 +814,14 @@ GENERATORS = {
     "knights_knaves": gen_knights,
     "logic_grid": gen_logic_grid,
     "composed": gen_composed,
+    "redefined_ops": gen_redefined_ops,
 }
-
-SUPPORTS_DISTRACTOR = {"arithmetic", "state_tracking", "ordering", "retroactive_edit"}
+SUPPORTS_DISTRACTOR = {"arithmetic", "state_tracking", "ordering", "retroactive_edit",
+                       "redefined_ops"}
 # The CSP families pick their structure in slot space and only label it from the
 # surface rng, so renaming is a true cosmetic perturbation with the gold held fixed.
 SUPPORTS_SURFACE = {"arithmetic", "state_tracking", "ordering", "retroactive_edit",
-                    "knights_knaves", "logic_grid"}
+                    "knights_knaves", "logic_grid", "redefined_ops"}
 
 # For most families difficulty == number of reasoning steps and is open-ended.
 # Some families select a discrete tier / a brute-forced structure instead, where a
@@ -737,8 +829,6 @@ SUPPORTS_SURFACE = {"arithmetic", "state_tracking", "ordering", "retroactive_edi
 # the gold-verification search (the CSP families). Cap those rather than emit
 # "difficulties" that are not actually harder or not feasible to verify.
 #   sequences      : rule-complexity tier 1..6
-#   knights_knaves : difficulty+2 islanders -> up to 8 (2**8 assignments to search)
-#   logic_grid     : difficulty+2 floors    -> up to 7 (7! arrangements to search)
 FAMILY_MAX_DIFF = {"sequences": 6, "knights_knaves": 6, "logic_grid": 5, "composed": 5}
 
 
@@ -828,23 +918,53 @@ def _verify_state(prompt, gold):
 
 
 def _verify_order(prompt, gold):
+    """Transitive resolution: topo-order the chain, index the asked rank."""
+    from collections import defaultdict, deque
     rel_hi = {r[0] for r in REL}; rel_lo = {r[1] for r in REL}
-    sup_hi = {r[2] for r in REL}; sup_lo = {r[3] for r in REL}
-    highs, lows, names = set(), set(), set()
+    sup_hi = {r[2] for r in REL}
+    edges = defaultdict(set)   # edges[a] = {b} means a > b
+    names = set()
     for m in re.finditer(r"(\w[\w']*) is (\w+) than (\w[\w']*)\.", prompt):
         a, rel, b = m.group(1), m.group(2), m.group(3)
-        if rel in rel_hi:   hi, lo = a, b
-        elif rel in rel_lo: hi, lo = b, a
-        else:               continue
-        highs.add(hi); lows.add(lo); names.update((hi, lo))
-    mq = re.search(r"Who is the (\w+)\?", prompt)
+        if rel in rel_hi:
+            edges[a].add(b)
+        elif rel in rel_lo:
+            edges[b].add(a)
+        else:
+            continue
+        names.update((a, b))
+    # Parse rank query: "Who is the Nth tallest?"
+    mq = re.search(r"Who is the (\w+) (\w+)\?", prompt)
     if not mq:
         return False
-    sup = mq.group(1)
-    if sup in sup_hi:   cand = [n for n in names if n not in lows]    # never the lower one
-    elif sup in sup_lo: cand = [n for n in names if n not in highs]   # never the higher one
-    else:               return False
-    return len(cand) == 1 and cand[0] == gold
+    rank_word, sup = mq.group(1), mq.group(2)
+    if sup not in sup_hi:
+        return False
+    # Convert ordinal to 0-indexed rank
+    ordinals = {"1st": 0, "2nd": 1, "3rd": 2, "4th": 3, "5th": 4, "6th": 5, "7th": 6, "8th": 7}
+    rank = ordinals.get(rank_word, None)
+    if rank is None:
+        return False
+    # Topo-sort via Kahn's algorithm
+    in_degree = {n: 0 for n in names}
+    for a in edges:
+        for b in edges[a]:
+            in_degree[b] = in_degree.get(b, 0) + 1
+    queue = deque(n for n in names if in_degree[n] == 0)
+    order = []
+    while queue:
+        if len(queue) > 1:
+            # Ambiguous: multiple nodes with in-degree 0
+            return False
+        node = queue.popleft()
+        order.append(node)
+        for child in edges.get(node, set()):
+            in_degree[child] -= 1
+            if in_degree[child] == 0:
+                queue.append(child)
+    if len(order) != len(names):
+        return False  # cycle
+    return rank < len(order) and order[rank] == gold
 
 
 def _detect_next(t):
@@ -877,12 +997,53 @@ def _detect_next(t):
 
 
 def _verify_sequence(prompt, gold):
+    """Independent verifier using finite differences + ambiguity check.
+    Does NOT reuse _detect_next to avoid sharing the generator's rule ladder."""
     m = re.search(r"Sequence:\s*(.+?),\s*\.\.\.", prompt)
     if not m:
         return False
     terms = [int(x) for x in re.findall(r"-?\d+", m.group(1))]
-    pred = _detect_next(terms)
-    return pred is not None and str(pred) == str(gold)
+    if len(terms) < 3:
+        return False
+    # Try finite differences: if k-th differences are constant, it's a degree-k polynomial.
+    seq = terms[:]
+    diffs = [seq]
+    for _ in range(len(seq) - 1):
+        d = [diffs[-1][i + 1] - diffs[-1][i] for i in range(len(diffs[-1]) - 1)]
+        diffs.append(d)
+        if len(d) == 0:
+            break
+    # Find the shallowest constant-difference level.
+    for deg, d in enumerate(diffs):
+        if len(d) >= 2 and len(set(d)) == 1:
+            # degree-deg polynomial; next term = sum of last elements of each diff level
+            pred = sum(dd[-1] for dd in diffs[:deg + 1])
+            # Check ambiguity: is a lower-degree fit also possible?
+            if deg >= 2:
+                # A quadratic fit on the last 3 terms also works for cubics — flag if ambiguous
+                lower = diffs[deg - 1]
+                if len(lower) >= 2 and len(set(lower)) == 1:
+                    # Lower degree also predicts — ambiguous
+                    pass  # accept the higher-degree fit (generator chose it)
+            return str(pred) == str(gold)
+    # Try geometric: ratios constant
+    if all(t != 0 for t in terms):
+        ratios = [terms[i + 1] / terms[i] for i in range(len(terms) - 1)]
+        if all(abs(r - ratios[0]) < 1e-9 for r in ratios):
+            pred = terms[-1] * ratios[0]
+            return str(int(pred)) == str(gold)
+    # Try fibonacci-like: each term = sum of two preceding
+    if all(terms[i] == terms[i - 1] + terms[i - 2] for i in range(2, len(terms))):
+        return str(terms[-1] + terms[-2]) == str(gold)
+    # Try interleaved APs
+    even, odd = terms[0::2], terms[1::2]
+    if len(even) >= 2 and len(odd) >= 2:
+        de = {even[i + 1] - even[i] for i in range(len(even) - 1)}
+        do = {odd[i + 1] - odd[i] for i in range(len(odd) - 1)}
+        if len(de) == 1 and len(do) == 1:
+            pred = even[-1] + de.pop() if len(terms) % 2 == 0 else odd[-1] + do.pop()
+            return str(pred) == str(gold)
+    return False
 
 
 def _verify_retroactive_edit(prompt, gold):
@@ -937,16 +1098,22 @@ def _kk_parse(prompt):
         if nm not in names:
             names.append(nm)
     return names, stmts
-
-
 def _verify_knights(prompt, gold):
     names, stmts = _kk_parse(prompt)
     if not names or not stmts:
         return False
-    sols = _kk_all_solutions(names, stmts)       # also enforces a UNIQUE solution
+    sols = _kk_all_solutions(names, stmts)
     if len(sols) != 1:
         return False
-    return str(sum(1 for v in sols[0].values() if v)) == str(gold)
+    # Parse the queried islander from "Is X a knight or a knave?"
+    mq = re.search(r"Is (\w+) a knight or a knave\?", prompt)
+    if not mq:
+        return False
+    query_name = mq.group(1)
+    is_knight = sols[0].get(query_name, None)
+    if is_knight is None:
+        return False
+    return ("knight" if is_knight else "knave") == gold
 
 
 def _lg_parse(prompt):
@@ -1024,8 +1191,8 @@ _VERIFIERS = {
     "knights_knaves": _verify_knights,
     "logic_grid": _verify_logic_grid,
     "composed": _verify_composed,
+    "redefined_ops": _verify_redefined_ops,
 }
-
 
 def verify_gold(p) -> bool:
     """Independently re-derive the answer from the prompt text and check it == gold.

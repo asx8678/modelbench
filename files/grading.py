@@ -12,6 +12,9 @@ from typing import Optional, List, Tuple
 _ANS = re.compile(r"(?im)^\s*answer\s*[:=]\s*(.+?)\s*$")
 _CONF = re.compile(r"(?im)^\s*confidence\s*[:=]\s*(\d{1,3})")
 _INT = re.compile(r"-?\d+")
+# Sentinel golds for premise-flaw detection
+NO_SOLUTION = "NO_SOLUTION"
+UNDETERMINED = "UNDETERMINED"
 
 
 def parse_confidence(text: str) -> Optional[int]:

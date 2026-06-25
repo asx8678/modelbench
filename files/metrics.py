@@ -275,6 +275,29 @@ def compute(con, run_id):
                  "maj@k": float(np.mean(maj)) if maj else 0.0,
                  "pass@k_oracle": float(np.mean(oracle)) if oracle else 0.0}
 
+    # ---- behavioral uncertainty (uses sampled answer distribution per item)
+    entropies = []
+    for i in base:
+        votes = [p for _, _, p, _ in samples[i] if p is not None]
+        if not votes:
+            continue
+        total = len(votes)
+        counts = Counter(votes)
+        h = 0.0
+        for cnt in counts.values():
+            p = cnt / total
+            h -= p * math.log2(p)
+        entropies.append(h)
+    avg_entropy = float(np.mean(entropies)) if entropies else 0.0
+    sc_gap = (passk["maj@k"] - passk["pass@1"]) if passk else None
+    stated_ece = calibration["ece"] if calibration else None
+    behavioral_uncertainty = {
+        "disagreement_entropy": avg_entropy,
+        "selfconsistency_gap": sc_gap,
+        "stated_confidence_ece": stated_ece,
+    }
+
+
     # ---- chance-corrected accuracy per family
     chance_baseline = {}
     acc_above_chance = {}
@@ -322,6 +345,7 @@ def compute(con, run_id):
         "degradation": {f: dict(d) for f, d in curve.items()},
         "distractibility": distract, "invariance": invariance,
         "calibration": calibration, "passk": passk,
+        "behavioral_uncertainty": behavioral_uncertainty,
     }
 
 
