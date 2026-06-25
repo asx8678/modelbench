@@ -244,46 +244,113 @@ def mock_one(item, sample_idx, mode):
 
 
 def _one_completion(item, cfg, sample_idx):
-    """Return (text, ptok, ctok, err). err is None on success."""
+    """Return (text, ptok, ctok, telemetry, err). err is None on success."""
     last_err = None
     for attempt in range(cfg["retries"] + 1):
         try:
             if cfg.get("mock"):
                 text, pt, ct = mock_one(item, sample_idx, cfg["mock"])
+                telemetry = _build_telemetry(cfg, pt, ct, None, 0, text)
+                return text, pt, ct, telemetry, None
             elif _provider_has_capability(cfg, "native_anthropic"):
-                text, pt, ct, *_ = call_anthropic(
+                text, pt, ct, timings, think_tokens = call_anthropic(
                     cfg["api_key"], cfg["model"],
                     build_messages(item, cfg["ask_confidence"]),
                     cfg["temperature"], cfg["max_tokens"], cfg["timeout"])
+                telemetry = _build_telemetry(cfg, pt, ct, timings, think_tokens, text)
+                return text, pt, ct, telemetry, None
             else:
                 text, pt, ct = call_api(
                     cfg["base_url"], cfg["api_key"], cfg["model"],
                     build_messages(item, cfg["ask_confidence"]),
                     cfg["temperature"], cfg["max_tokens"], cfg["timeout"])
-            return text, pt, ct, None
+                # OpenAI-compat: no stream timings available.
+                return text, pt, ct, None, None
         except _RETRYABLE as e:
             last_err = e
             if attempt < cfg["retries"]:
                 time.sleep(min(2 ** attempt, 8))
-    return None, None, None, last_err
+    return None, None, None, None, last_err
 
+
+def _build_telemetry(cfg, prompt_tokens, completion_tokens, timings, think_tokens, text):
+    """Build an honest telemetry payload for the native Anthropic path."""
+    capabilities = list(cfg.get("capabilities", []))
+    unobservable = {}
+
+    # Anthropic Opus 4.8 exposes no thinking-token breakdown; be honest about it.
+    if think_tokens:
+        reasoning_token_source = "native_usage"
+        reasoning_tokens = int(think_tokens)
+    else:
+        reasoning_token_source = "unavailable"
+        reasoning_tokens = 0
+        unobservable["reasoning_tokens"] = "not_exposed_by_provider"
+
+    # Reasoning density proxy: only meaningful when we have a non-zero completion
+    # and the provider exposes a reasoning-token count.
+    if reasoning_tokens and completion_tokens:
+        answer_estimate = max(completion_tokens - reasoning_tokens, 1)
+        reasoning_density_proxy = (completion_tokens - answer_estimate) / answer_estimate
+    else:
+        reasoning_density_proxy = None
+        if reasoning_token_source == "unavailable":
+            unobservable["reasoning_density_proxy"] = "reasoning_tokens_unavailable"
+
+    # Timing fields.
+    timings = timings or {}
+    ttft_ms = int(round(timings.get("ttft", 0) * 1000)) if timings.get("ttft") is not None else None
+    first_reasoning_ms = int(round(timings.get("first_reasoning", 0) * 1000)) if timings.get("first_reasoning") is not None else None
+    answer_wall_ms = int(round(timings.get("answer_wall", 0) * 1000)) if timings.get("answer_wall") is not None else None
+
+    # first_reasoning == ttft when display:omitted, so it is ops-only.
+    if first_reasoning_ms is not None:
+        unobservable["first_reasoning_ms"] = "ops_only_equals_ttft_when_display_omitted"
+
+    # reasoning_wall_ms has no direct producer; label as such.
+    reasoning_wall_ms = None
+    unobservable["reasoning_wall_ms"] = "no_direct_producer"
+
+    # These columns are unobservable on Anthropic / current stream parser.
+    unobservable["token_entropy"] = "unobservable"
+    unobservable["thinking_tps"] = "unobservable"
+    unobservable["tot_branch_map"] = "unobservable"
+
+    return {
+        "capabilities": capabilities,
+        "reasoning_token_source": reasoning_token_source,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "reasoning_tokens": reasoning_tokens,
+        "reasoning_density_proxy": reasoning_density_proxy,
+        "ttft_ms": ttft_ms,
+        "first_reasoning_ms": first_reasoning_ms,
+        "reasoning_wall_ms": reasoning_wall_ms,
+        "answer_wall_ms": answer_wall_ms,
+        "unobservable_fields": unobservable,
+    }
 
 def _process(item, cfg):
-    """Run all samples for one item. Returns (item_id, rows, err_summary)."""
-    rows, last_err = [], None
+    """Run all samples for one item. Returns (item_id, rows, telemetry_list, err_summary)."""
+    rows, telemetry_list, last_err = [], [], None
     for s in range(cfg["n"]):
         t0 = time.time()
-        text, ptok, ctok, err = _one_completion(item, cfg, s)
+        text, ptok, ctok, telemetry, err = _one_completion(item, cfg, s)
         latency = int((time.time() - t0) * 1000)
         if err is not None:
             last_err = err
             rows.append((storage.ERROR_MARKER, None, None, None, latency, None, None, None))
             continue
+        if telemetry is not None:
+            telemetry_list.append((item["item_id"], s, telemetry))
         parsed, correct, conf, parse_source = grading.grade(
             text, item["answer_type"], item["gold"],
             item["choices"].split("|") if item.get("choices") else None)
         rows.append((text, parsed, correct, conf, latency, ptok, ctok, parse_source))
+    return item["item_id"], rows, telemetry_list, (str(last_err) if last_err else None)
     return item["item_id"], rows, (str(last_err) if last_err else None)
+
+
 
 
 def run(con, run_id, items, cfg):
@@ -297,16 +364,15 @@ def run(con, run_id, items, cfg):
         futs = {ex.submit(_process, it, cfg): it for it in todo}
         for fut in as_completed(futs):
             try:
-                item_id, rows, err = fut.result()
+                item_id, rows, telemetry_list, err = fut.result()
             except Exception as e:                       # never let one item abort the run
-                item_id, rows, err = futs[fut]["item_id"], [_ERROR_ROW], str(e)
+                item_id, rows, telemetry_list, err = futs[fut]["item_id"], [_ERROR_ROW], [], str(e)
+            for item_id_t, s, telemetry in telemetry_list:
+                storage.save_telemetry(con, run_id, item_id_t, s, **telemetry)
             for i, (raw, parsed, correct, conf, lat, pt, ct, parse_source) in enumerate(rows):
                 storage.save_response(con, run_id, item_id, i, raw, parsed, correct, conf, lat, pt, ct,
                                     metadata={"parse_source": parse_source})
             n_done += 1
-            if err:
-                n_err += 1
-                print(f"  ! {item_id}: {err}")
             if n_done % 25 == 0 or n_done == len(todo):
                 con.commit()
                 print(f"  {n_done}/{len(todo)}")

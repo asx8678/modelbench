@@ -117,6 +117,29 @@ def test_logic_grid_is_uniquely_solvable_and_scales():
         sols = generators._lg_solutions(names, n, clues)
         assert len(sols) == 1
         assert str(sols[0][q]) == p.gold
+def test_unsat_csp_dropped_clue_with_invariant_queried_slot_is_determinate():
+    # bench-le7.1 regression: when a clue is dropped and the puzzle becomes
+    # under-constrained, the queried slot may still be invariant across all
+    # remaining solutions. The gold must be the determinate knight/knave, not
+    # the generic UNDETERMINED sentinel.
+    prompt, gold, _atype, choices = generators.gen_unsat_csp(2, 4, 0, False)
+    names, stmts = generators._kk_parse(prompt)
+    sols = generators._kk_all_solutions(names, stmts)
+    assert len(sols) > 1, "expected an under-constrained (dropped-clue) item"
+    query_name = __import__('re').search(r"Is (\w+) a knight or a knave\?", prompt).group(1)
+    values = {s.get(query_name) for s in sols}
+    assert len(values) == 1, "this seed's queried slot should be invariant"
+    assert gold in ("knight", "knave"), gold
+    assert gold == ("knight" if next(iter(values)) else "knave")
+
+
+def test_unsat_csp_verifier_rejects_undetermined_on_invariant_slot():
+    # bench-le7.2 regression: the verifier must independently check the set of
+    # values for the queried slot, not blindly accept UNDETERMINED whenever there
+    # are multiple solutions.
+    prompt, gold, _atype, choices = generators.gen_unsat_csp(2, 4, 0, False)
+    assert generators._verify_unsat_csp(prompt, gold) is True
+    assert generators._verify_unsat_csp(prompt, "UNDETERMINED") is False
 
 
 def test_csp_puzzles_are_minimally_constrained():
@@ -338,6 +361,66 @@ def test_rerun_does_not_duplicate():
     n2 = con.execute("SELECT COUNT(*) FROM responses WHERE run_id='r'").fetchone()[0]
     assert n1 == n2 == len(ds)
 
+
+
+# ------------------------------------------------- telemetry persistence (#mf4.1/2)
+def test_mock_run_writes_telemetry_row_with_caps_and_source():
+    items = generators.build_dataset(["arithmetic"], 1, 1, 2)
+    con, ds = _db_with(items)
+    cfg = _cfg(mock="perfect", capabilities=["stream", "mock"], n=2)
+    runner.run(con, "r1", ds, cfg)
+    row = storage.load_telemetry(con, "r1", ds[0]["item_id"], 0)
+    assert row is not None
+    assert row["capabilities"] == ["stream", "mock"]
+    assert row["reasoning_token_source"] is not None
+    # mock path has no honest producer for reasoning tokens
+    assert row["reasoning_token_source"] == "unavailable"
+    assert row["prompt_tokens"] is None
+
+
+def test_mock_run_telemetry_marks_unobservable_fields():
+    items = generators.build_dataset(["arithmetic"], 1, 1, 2)
+    con, ds = _db_with(items)
+    cfg = _cfg(mock="perfect", capabilities=["mock"], n=1)
+    runner.run(con, "r2", ds, cfg)
+    row = storage.load_telemetry(con, "r2", ds[0]["item_id"], 0)
+    assert row is not None
+    unobs = row["unobservable_fields"]
+    assert unobs["reasoning_wall_ms"] == "no_direct_producer"
+    assert "token_entropy" in unobs
+    assert "thinking_tps" in unobs
+    assert "tot_branch_map" in unobs
+
+
+def test_build_telemetry_reasonable_when_think_tokens_present():
+    cfg = _cfg(capabilities=["native_anthropic", "stream"])
+    telemetry = runner._build_telemetry(
+        cfg, prompt_tokens=10, completion_tokens=100,
+        timings={"ttft": 0.1, "first_reasoning": 0.2,
+                 "answer_wall": 0.5, "total": 0.6},
+        think_tokens=30, text="ANSWER: 42")
+    assert telemetry["reasoning_token_source"] == "native_usage"
+    assert telemetry["reasoning_tokens"] == 30
+    # density proxy = (ct - (ct - rt)) / (ct - rt) = rt / (ct - rt)
+    assert telemetry["reasoning_density_proxy"] == pytest.approx(30 / 70)
+    assert telemetry["ttft_ms"] == 100
+    assert telemetry["first_reasoning_ms"] == 200
+    assert telemetry["answer_wall_ms"] == 500
+    assert telemetry["reasoning_wall_ms"] is None
+    assert telemetry["unobservable_fields"]["reasoning_wall_ms"] == "no_direct_producer"
+
+
+def test_build_telemetry_honest_null_when_think_tokens_absent():
+    cfg = _cfg(capabilities=["native_anthropic"])
+    telemetry = runner._build_telemetry(
+        cfg, prompt_tokens=10, completion_tokens=100,
+        timings={"ttft": 0.1, "first_reasoning": 0.2,
+                 "answer_wall": 0.5, "total": 0.6},
+        think_tokens=0, text="ANSWER: 42")
+    assert telemetry["reasoning_token_source"] == "unavailable"
+    assert telemetry["reasoning_tokens"] == 0
+    assert telemetry["reasoning_density_proxy"] is None
+    assert telemetry["unobservable_fields"]["reasoning_tokens"] == "not_exposed_by_provider"
 
 def test_baseline_metrics_unchanged():
     # Full reference dataset snapshot: every family, difficulties 1..6, reps 12,

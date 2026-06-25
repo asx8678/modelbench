@@ -861,10 +861,16 @@ def gen_unsat_csp(difficulty, structure_seed, surface_seed, distractor):
     query_slot = rs.randrange(n)
     if len(sols) == 0:
         gold = "NO_SOLUTION"
-    elif len(sols) > 1:
-        gold = "UNDETERMINED"
-    else:
+    elif len(sols) == 1:
         gold = "knight" if sols[0][query_slot] else "knave"
+    else:
+        # Multiple solutions after the ill-clue: the queried slot may still be
+        # invariant, in which case the answer is determinate, not UNDETERMINED.
+        values = {s[query_slot] for s in sols}
+        if len(values) == 1:
+            gold = "knight" if next(iter(values)) else "knave"
+        else:
+            gold = "UNDETERMINED"
 
     ru.shuffle(ill_clues)
     sents = []
@@ -883,7 +889,7 @@ def gen_unsat_csp(difficulty, structure_seed, surface_seed, distractor):
 
 
 def _verify_unsat_csp(prompt, gold):
-    """Re-derive solution count from prompt text and check gold matches."""
+    """Re-derive solution set from prompt text and check gold matches the queried slot."""
     names, stmts = _kk_parse(prompt)
     if not names:
         return False
@@ -894,13 +900,11 @@ def _verify_unsat_csp(prompt, gold):
     query_name = mq.group(1)
     if len(sols) == 0:
         return gold == "NO_SOLUTION"
-    elif len(sols) > 1:
-        return gold == "UNDETERMINED"
-    else:
-        is_knight = sols[0].get(query_name, None)
-        if is_knight is None:
-            return False
-        return gold == ("knight" if is_knight else "knave")
+    values = {s.get(query_name) for s in sols}
+    if len(values) == 1:
+        expected = "knight" if next(iter(values)) else "knave"
+        return gold == expected
+    return gold == "UNDETERMINED"
 
 def _mk(family, difficulty, structure_seed, surface_seed, distractor, probe, grp):
     result = GENERATORS[family](difficulty, structure_seed, surface_seed, distractor)
