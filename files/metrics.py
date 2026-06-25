@@ -446,11 +446,12 @@ def print_summary(res):
     print("accuracy by family:")
     for f, a in sorted(res["accuracy_by_family"].items()):
         print(f"  {f:16s} {a:.3f}")
-    print("\ndegradation (accuracy ± 95% CI half-width by difficulty):")
+    print("\ndegradation (accuracy ± 95% CI half-width by difficulty; axis varies per family):")
+    import generators
     for f, d in sorted(res["degradation"].items()):
         cells = "  ".join(f"d{k}:{v['mean']:.2f}±{(v['hi']-v['lo'])/2:.2f}"
                           for k, v in sorted(d.items()))
-        print(f"  {f:16s} {cells}")
+        print(f"  {f:16s} [{generators.difficulty_axis(f)}]  {cells}")
     if res["distractibility"]:
         print("\ndistractibility (paired base vs +irrelevant clause):")
         for f, v in sorted(res["distractibility"].items()):

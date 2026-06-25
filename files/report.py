@@ -17,6 +17,7 @@ import matplotlib.pyplot as plt
 
 import numpy as np
 import metrics
+import generators
 
 # Okabe-Ito (skip pure black for lines on white; keep for text)
 OKABE = ["#E69F00", "#56B4E9", "#009E73", "#D55E00", "#0072B2", "#CC79A7", "#F0E442", "#000000"]
@@ -59,12 +60,16 @@ def degradation_chart(run_results, labels, outpath):
             upper = [max(0.0, d[x]["hi"] - d[x]["mean"]) for x in xs]
             ax.errorbar(xs, ys, yerr=[lower, upper], label=lab, capsize=4, **_style(i))
         ax.set_title(fam, fontweight="bold")
-        ax.set_xlabel("difficulty")
+        # E6: the difficulty axis is not the same quantity across families
+        # (reasoning steps vs rule tier vs problem size). Label each honestly so
+        # the curves are not misread as one shared "more steps" axis.
+        ax.set_xlabel(generators.difficulty_axis(fam))
         ax.set_ylabel("accuracy")
         ax.set_ylim(-0.03, 1.03)
         ax.legend(fontsize=11, framealpha=0.9)
-    fig.suptitle("Accuracy vs difficulty  (error bars = Wilson 95% CI)",
-                 fontsize=15, fontweight="bold")
+    fig.suptitle("Accuracy vs difficulty axis  (per-family; axes are NOT commensurable — "
+                 "error bars = Wilson 95% CI)",
+                 fontsize=13, fontweight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.97])
     fig.savefig(outpath, bbox_inches="tight")
     plt.close(fig)
@@ -236,6 +241,7 @@ def write_csv(run_results, labels, outpath):
                 w.writerow([lab, "coverage", "", "", round(res["coverage"]["coverage"], 4)])
             if res["calibration"]:
                 w.writerow([lab, "ece", "", "", round(res["calibration"]["ece"], 4)])
+            if res.get("passk"):                     # only when n>1 (single-sample runs have no pass@k)
                 w.writerow([lab, "pass@k_oracle", "", "", round(res["passk"]["pass@k_oracle"], 4)])
             if res.get("confabulation_rate") is not None:
                 w.writerow([lab, "confabulation_rate", "", "", round(res["confabulation_rate"], 4)])

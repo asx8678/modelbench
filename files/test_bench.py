@@ -190,6 +190,18 @@ def test_naive_solver_now_fails_on_distractor(family):
     assert fooled > 0, f"{family}: relevance-blind solver was never fooled — distractor still inert"
 
 
+def test_difficulty_axis_labels_are_honest():
+    # bench-lop / E6: the difficulty axis is not the same quantity across families.
+    # Tier/size families must be labelled distinctly from the default "reasoning steps".
+    assert generators.difficulty_axis("arithmetic") == "reasoning steps"
+    assert generators.difficulty_axis("sequences") == "rule tier"
+    for fam in ("knights_knaves", "logic_grid", "unsat_csp"):
+        assert "n" in generators.difficulty_axis(fam)
+    # every generator family resolves to some axis label (default included)
+    for fam in generators.GENERATORS:
+        assert generators.difficulty_axis(fam)
+
+
 def test_sequences_capped_at_tier_6():
     # tier 6 (cubic) is the hardest rule; asking for more must not silently reuse it
     ds = generators.build_dataset(["sequences"], 1, 9, 3, verify=True)

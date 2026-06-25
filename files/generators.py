@@ -1140,6 +1140,25 @@ SUPPORTS_SURFACE = {"arithmetic", "state_tracking", "ordering", "retroactive_edi
 FAMILY_MAX_DIFF = {"sequences": 6, "knights_knaves": 6, "logic_grid": 5, "composed": 5,
                     "unsat_csp": 6}
 
+# What the `difficulty` integer MEANS per family (bench-lop / E6). For most
+# families it is the number of reasoning steps, so the degradation curve is a true
+# depth axis. For a few it is NOT commensurable with steps: `sequences` selects a
+# rule TIER (d1=AP .. d6=cubic -- a different rule, not more steps) and the CSP
+# families scale the problem SIZE n. Reporting uses this so the per-family x-axis
+# is labelled honestly and the curves are not read as one shared "more steps" axis.
+DIFFICULTY_AXIS = {
+    "sequences": "rule tier",
+    "knights_knaves": "islanders (n)",
+    "logic_grid": "floors (n)",
+    "unsat_csp": "islanders (n)",
+    "composed": "chain / per-hop difficulty",
+}
+
+
+def difficulty_axis(family: str) -> str:
+    """Human-readable name of a family's difficulty axis (default: reasoning steps)."""
+    return DIFFICULTY_AXIS.get(family, "reasoning steps")
+
 
 @dataclass
 class Problem:

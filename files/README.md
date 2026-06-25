@@ -10,7 +10,7 @@ that actually distinguish reasoning from pattern-matching:
 
 | Signal | What it asks | Why it matters |
 |---|---|---|
-| **Degradation curve** | Does accuracy hold as you add reasoning steps? | Real reasoning degrades *gracefully*; pattern-matching falls off a cliff. |
+| **Degradation curve** | Does accuracy hold as the difficulty axis rises? | Real reasoning degrades *gracefully*; pattern-matching falls off a cliff. The axis is **per-family, not commensurable**: most families scale reasoning steps, but `sequences` scales a *rule tier* (AP→cubic) and the CSP families scale *problem size n*. Read each curve against itself, not across families. |
 | **Variance** | How much does accuracy wobble across equivalent problems? | High variance on structurally-identical items = brittle. |
 | **Distractibility** | Does an irrelevant clause break it? | The GSM-NoOp probe. A big drop means it isn't tracking relevance. |
 | **Surface invariance** | Same computation, different names — does the answer flip? | Answer flips mean it's keying on surface, not structure. |
