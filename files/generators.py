@@ -104,13 +104,14 @@ def gen_arithmetic(difficulty, structure_seed, surface_seed, distractor):
             clauses.append(f"{name} divides the {item} into {f} equal groups and keeps one group.")
 
     if distractor:
-        # NoOp distractor in the SAME surface form as a real update, about a
-        # different person (the subject-keyed verifier skips it). No stock
-        # phrase or foreign item to key on -- the model must track the subject.
-        oname = rd.choice([n for n in NAMES if n != name])
+        # Relevance-true NoOp (bench-ukn / E1): the SAME subject acts on a
+        # DIFFERENT item. A subject-name filter no longer separates the clause --
+        # the model (and the item-aware verifier) must bind each operation to the
+        # queried item, not just the queried name.
+        oitem = rd.choice([it for it in ITEMS if it != item])
         verb = rd.choice(["buys", "finds", "is given", "picks up"])
         ox = rd.randint(2, 20)
-        clauses.insert(1, f"{oname} {verb} {ox} more {item}.")
+        clauses.insert(1, f"{name} {verb} {ox} {oitem}.")
 
     prompt = " ".join(clauses) + f" How many {item} does {name} have now?"
     return prompt, str(current), "int", None
@@ -148,12 +149,14 @@ def gen_state(difficulty, structure_seed, surface_seed, distractor):
 
     qi = rs.randrange(3)
     if distractor:
-        # NoOp distractor phrased like an initial container declaration, about a
-        # container that is never updated or queried. The verifier parses it but
-        # never reads it; no "A nearby" stock phrase to key on.
-        oc = rd.choice([c for c in CONTAINERS if c not in names])
-        ox = rd.randint(3, 15)
-        clauses.insert(3, f"{oc.capitalize()} has {ox} {item}.")
+        # Relevance-true NoOp (E1): a real-looking UPDATE to a TRACKED container,
+        # but about a DIFFERENT item. A container-name filter no longer separates
+        # it; the item-aware verifier binds updates to the queried item, so the
+        # different-item clause is correctly inert.
+        oitem = rd.choice([it for it in ITEMS if it != item])
+        oc = names[rd.randrange(3)]
+        ox = rd.randint(2, 12)
+        clauses.insert(3, f"{ox} {oitem} are added to {oc}.")
 
     prompt = " ".join(clauses) + f" How many {item} are in {names[qi]} now?"
     return prompt, str(state[qi]), "int", None
@@ -215,11 +218,13 @@ def gen_retroactive_edit(difficulty, structure_seed, surface_seed, distractor):
     # independent container made the "Actually..." pivot a no-op ~2/3 of the time.)
     qi = edit_i
     if distractor:
-        # NoOp distractor phrased like an initial declaration (never edited or
-        # queried), with no "A nearby" stock phrase.
-        oc = ru.choice([c for c in CONTAINERS if c not in names])
-        ox = ru.randint(3, 15)
-        clauses.insert(3, f"{oc.capitalize()} has {ox} {item}.")
+        # Relevance-true NoOp (E1): a different-item update to a TRACKED container.
+        # The item-aware verifier (re.escape(item) below) already ignores it, so
+        # the gold stays a true NoOp while a container-only filter would mis-apply it.
+        oitem = ru.choice([it for it in ITEMS if it != item])
+        oc = names[ru.randrange(3)]
+        ox = ru.randint(2, 12)
+        clauses.insert(3, f"{ox} {oitem} are added to {oc}.")
 
     prompt = " ".join(clauses) + f" How many {item} are in {names[qi]} now?"
     # Recompute gold from the INITIAL state, with the edit applied, then replay
@@ -348,19 +353,16 @@ def gen_order(difficulty, structure_seed, surface_seed, distractor):
             clauses.append(f"{b} is {anti} than {a}.")
 
     if distractor:
-        # NoOp distractor: a non-comparison fact about someone in the ordering.
-        # The ordering grammar is comparison-only, so a NoOp must be
-        # non-comparative; rotating templates removes the single fixed stock
-        # phrase, so the model must recognise the clause doesn't constrain rank.
-        who = rd.choice(order)
-        months = ("April", "July", "October", "January")
-        drinks = ("coffee", "tea", "juice", "cocoa")
-        clauses.insert(0, rd.choice([
-            f"{who} is wearing a {rd.choice(COLORS)} hat.",
-            f"{who} owns a {rd.choice(COLORS)} bicycle.",
-            f"{who} was born in {rd.choice(months)}.",
-            f"{who} usually drinks {rd.choice(drinks)} in the morning.",
-        ]))
+        # Relevance-true NoOp (E2): an in-grammar comparative on an ORTHOGONAL
+        # relation family. Same "X is <comp> than Y" surface as a real clue, but a
+        # different adjective axis (e.g. "richer" inside a height ordering), so a
+        # "than"-regex no longer separates it. The relation-bound verifier ignores
+        # off-axis edges because they don't match the asked superlative, so the
+        # clue is genuinely inert -- the model must bind the relation to the query.
+        dtup = rd.choice([r for r in REL if r != (comp, anti, sup_hi, sup_lo)])
+        a, b = rd.sample(order, 2)
+        clauses.insert(0, f"{a} is {dtup[0]} than {b}." if rd.random() < 0.5
+                       else f"{a} is {dtup[1]} than {b}.")
 
     prompt = " ".join(clauses) + f" Who is the {rank_word} {sup_hi}?"
     return prompt, gold, "choice", names
@@ -889,12 +891,11 @@ def gen_redefined_ops(difficulty, structure_seed, surface_seed, distractor):
         clauses.append(f"{name} {sym} {k} {item}.")
         current = new
     if distractor:
-        # NoOp distractor in the same form as the opening clause but about a
-        # different person and with no operator symbol, so the (subject-blind)
-        # verifier's first "starts with" match stays the real subject's and no
-        # redefined op is applied to it.
-        oname = rd.choice([n for n in NAMES if n != name])
-        clauses.insert(1, f"{oname} starts with {rd.randint(2, 20)} {item}.")
+        # Relevance-true NoOp (E1): the SAME subject, a DIFFERENT item, and no
+        # operator symbol. Not separable by "different person"; the symbol-keyed
+        # verifier still ignores it (no redefined operator to apply).
+        oitem = rd.choice([it for it in ITEMS if it != item])
+        clauses.insert(2, f"{name} keeps {rd.randint(2, 20)} {oitem} in a drawer.")
     prompt = " ".join(clauses) + f" How many {item} does {name} have now?"
     return prompt, str(current), "int", None
 
@@ -1186,13 +1187,15 @@ def _sentences(prompt):
 
 
 def _verify_arithmetic(prompt, gold):
-    mq = re.search(r"How many .+? does (.+?) have now\?", prompt)
+    mq = re.search(r"How many (.+?) does (.+?) have now\?", prompt)
     if not mq:
         return False
-    subj, total = mq.group(1), None
+    item, subj, total = mq.group(1), mq.group(2), None
     for s in _sentences(prompt):
         if not s.startswith(subj + " "):
-            continue                                   # skips the distractor (different name)
+            continue
+        if not re.search(r"\b" + re.escape(item) + r"\b", s):
+            continue                                   # different-item NoOp distractor
         rest = s[len(subj) + 1:]
         if (m := re.match(r"starts with (\d+)", rest)):       total = int(m.group(1))
         elif total is None:                                    continue
@@ -1205,48 +1208,58 @@ def _verify_arithmetic(prompt, gold):
 
 
 def _verify_state(prompt, gold):
+    mq = re.search(r"How many (.+?) are in (.+?) now\?", prompt)
+    if not mq:
+        return False
+    item, qc = mq.group(1), mq.group(2).lower()
     state = {}
     for s in _sentences(prompt):
-        m = re.match(r"(.+?) has (\d+) ", s)
-        if m and " are " not in s:
-            # An untracked distractor container is parsed but never queried.
+        m = re.match(r"(.+?) has (\d+) (\w+)", s)
+        if m and " are " not in s and m.group(3) == item:
             state[m.group(1).lower()] = int(m.group(2))
     for s in _sentences(prompt):
-        if (m := re.match(r"(\d+) \S+ are added to (.+?)\.", s)):
-            state[m.group(2).lower()] = state.get(m.group(2).lower(), 0) + int(m.group(1))
-        elif (m := re.match(r"(\d+) \S+ are removed from (.+?)\.", s)):
-            state[m.group(2).lower()] = state.get(m.group(2).lower(), 0) - int(m.group(1))
-        elif (m := re.match(r"(\d+) \S+ are moved from (.+?) to (.+?)\.", s)):
+        # Bind every update to the queried item: a different-item NoOp distractor
+        # to a tracked container must not move the count.
+        if (m := re.match(r"(\d+) (\w+) are added to (.+?)\.", s)) and m.group(2) == item:
+            state[m.group(3).lower()] = state.get(m.group(3).lower(), 0) + int(m.group(1))
+        elif (m := re.match(r"(\d+) (\w+) are removed from (.+?)\.", s)) and m.group(2) == item:
+            state[m.group(3).lower()] = state.get(m.group(3).lower(), 0) - int(m.group(1))
+        elif (m := re.match(r"(\d+) (\w+) are moved from (.+?) to (.+?)\.", s)) and m.group(2) == item:
             k = int(m.group(1))
-            state[m.group(2).lower()] = state.get(m.group(2).lower(), 0) - k
-            state[m.group(3).lower()] = state.get(m.group(3).lower(), 0) + k
-    mq = re.search(r"are in (.+?) now\?", prompt)
-    return bool(mq) and str(state.get(mq.group(1).lower())) == str(gold)
+            state[m.group(3).lower()] = state.get(m.group(3).lower(), 0) - k
+            state[m.group(4).lower()] = state.get(m.group(4).lower(), 0) + k
+    return str(state.get(qc)) == str(gold)
 
 
 def _verify_order(prompt, gold):
-    """Transitive resolution: topo-order the chain, index the asked rank."""
+    """Transitive resolution: topo-order the chain, index the asked rank.
+
+    The relation family is bound to the question's superlative, so a comparative
+    on an ORTHOGONAL family (the E2 distractor, e.g. "richer" in a height
+    ordering) contributes no edge and is correctly ignored.
+    """
     from collections import defaultdict, deque
-    rel_hi = {r[0] for r in REL}; rel_lo = {r[1] for r in REL}
-    sup_hi = {r[2] for r in REL}
-    edges = defaultdict(set)   # edges[a] = {b} means a > b
-    names = set()
-    for m in re.finditer(r"(\w[\w']*) is (\w+) than (\w[\w']*)\.", prompt):
-        a, rel, b = m.group(1), m.group(2), m.group(3)
-        if rel in rel_hi:
-            edges[a].add(b)
-        elif rel in rel_lo:
-            edges[b].add(a)
-        else:
-            continue
-        names.update((a, b))
-    # Parse rank query: "Who is the Nth tallest?"
+    # Parse rank query first: "Who is the Nth tallest?" -> resolve the relation
+    # family whose superlative-high is the asked word, and only read that family.
     mq = re.search(r"Who is the (\w+) (\w+)\?", prompt)
     if not mq:
         return False
     rank_word, sup = mq.group(1), mq.group(2)
-    if sup not in sup_hi:
+    tup = next((r for r in REL if r[2] == sup), None)
+    if tup is None:
         return False
+    hi_adj, lo_adj = tup[0], tup[1]
+    edges = defaultdict(set)   # edges[a] = {b} means a > b
+    names = set()
+    for m in re.finditer(r"(\w[\w']*) is (\w+) than (\w[\w']*)\.", prompt):
+        a, rel, b = m.group(1), m.group(2), m.group(3)
+        if rel == hi_adj:
+            edges[a].add(b)
+        elif rel == lo_adj:
+            edges[b].add(a)
+        else:
+            continue                                   # off-axis comparative: inert
+        names.update((a, b))
     # Convert ordinal to 0-indexed rank
     ordinals = {"1st": 0, "2nd": 1, "3rd": 2, "4th": 3, "5th": 4, "6th": 5, "7th": 6, "8th": 7}
     rank = ordinals.get(rank_word, None)

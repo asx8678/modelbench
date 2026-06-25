@@ -64,6 +64,132 @@ def test_distractor_is_noop_without_stock_phrase(family):
     assert changed                                            # the probe actually injects a clause
 
 
+# agent tokens a shallow "subject/container filter" solver would key on, per family.
+_AGENT_POOL = {
+    "arithmetic": generators.NAMES,
+    "redefined_ops": generators.NAMES,
+    "ordering": generators.NAMES,
+    "state_tracking": generators.CONTAINERS,
+    "retroactive_edit": generators.CONTAINERS,
+}
+
+
+def _injected_clause(base, dist):
+    bset = set(re.split(r"(?<=\.)\s+", base.prompt))
+    for s in re.split(r"(?<=\.)\s+", dist.prompt):
+        if s not in bset:
+            return s
+    return None
+
+
+@pytest.mark.parametrize("family", sorted(generators.SUPPORTS_DISTRACTOR))
+def test_distractor_not_separable_by_token_filter(family):
+    # bench-ukn / E1+E2: the distractor must require RELEVANCE reasoning, not a
+    # surface token filter. It must introduce no NEW agent token (so a
+    # "different-person/different-container" filter can't separate it) and instead
+    # be off-axis: a different item (numeric families) or an orthogonal relation
+    # (ordering). The stock-phrase fix (bench-9bt) did not guarantee this.
+    pool = _AGENT_POOL[family]
+    injected = 0
+    for diff in range(1, 7):
+        for seed in range(40):
+            base = generators._mk(family, diff, seed, 0, False, "base", "g")
+            dist = generators._mk(family, diff, seed, 0, True, "distractor", "g")
+            if dist.prompt == base.prompt:
+                continue
+            injected += 1
+            inj = _injected_clause(base, dist)
+            assert inj is not None
+            base_agents = {a for a in pool if a.lower() in base.prompt.lower()}
+            inj_agents = {a for a in pool if a.lower() in inj.lower()}
+            # no agent token absent from the base => "new person/container" filter is useless
+            assert inj_agents <= base_agents, (family, inj)
+            if family == "ordering":
+                # off-axis comparative: same grammar, adjective not in the asked family
+                assert " than " in inj
+                qsup = re.search(r"the \w+ (\w+)\?", base.prompt).group(1)
+                fam_tup = next(r for r in generators.REL if r[2] == qsup)
+                assert not re.search(rf"\b{fam_tup[0]}\b|\b{fam_tup[1]}\b", inj), inj
+            else:
+                # off-item: the injected clause names an ITEM other than the queried one
+                qitem = re.search(r"How many (\w+) (?:does|are)", base.prompt).group(1)
+                inj_items = {it for it in generators.ITEMS if re.search(rf"\b{it}\b", inj)}
+                assert inj_items and qitem not in inj_items, (family, inj)
+    assert injected
+
+
+@pytest.mark.parametrize("family", ["arithmetic", "state_tracking", "ordering"])
+def test_naive_solver_now_fails_on_distractor(family):
+    # The probe earns its name only if a relevance-blind heuristic is actually
+    # WRONG on it. A solver that ignores the off-axis dimension (item or relation
+    # family) and applies every clause about the right agent must mis-grade at
+    # least some distractor items -- otherwise the distractor is still inert to
+    # shallow matching.
+    def naive_answer(p):
+        if family == "ordering":
+            # relation-blind: treat ANY "X is <adj> than Y" as an ordering edge.
+            from collections import defaultdict
+            edges = defaultdict(set); names = set()
+            hi = {r[0] for r in generators.REL}; lo = {r[1] for r in generators.REL}
+            for m in re.finditer(r"(\w+) is (\w+) than (\w+)\.", p.prompt):
+                a, rel, b = m.groups()
+                if rel in hi: edges[a].add(b); names |= {a, b}
+                elif rel in lo: edges[b].add(a); names |= {a, b}
+            indeg = {n: 0 for n in names}
+            for a in edges:
+                for b in edges[a]: indeg[b] = indeg.get(b, 0) + 1
+            order, q = [], [n for n in names if indeg[n] == 0]
+            while len(q) == 1:
+                n = q.pop(); order.append(n)
+                for c in edges.get(n, ()):
+                    indeg[c] -= 1
+                    if indeg[c] == 0: q.append(c)
+            mq = re.search(r"the (\w+) \w+\?", p.prompt)
+            rk = {"1st":0,"2nd":1,"3rd":2,"4th":3,"5th":4,"6th":5}.get(mq.group(1))
+            return order[rk] if rk is not None and rk < len(order) else None
+        # numeric: item-blind subject/container filter.
+        if family == "arithmetic":
+            subj = re.search(r"does (.+?) have now", p.prompt).group(1)
+            total = None
+            for s in re.split(r"(?<=\.)\s+", p.prompt):
+                if not s.startswith(subj + " "): continue
+                rest = s[len(subj) + 1:]
+                if (m := re.match(r"starts with (\d+)", rest)): total = int(m.group(1))
+                elif total is None: continue
+                elif (m := re.match(r"(?:buys|finds|is given|picks up) (\d+)", rest)): total += int(m.group(1))
+                elif (m := re.match(r"(?:gives away|loses|uses|drops) (\d+)", rest)): total -= int(m.group(1))
+                elif rest.startswith("doubles"): total *= 2
+                elif rest.startswith("triples"): total *= 3
+            return str(total)
+        # state_tracking: container filter, item-blind.
+        state = {}
+        for s in re.split(r"(?<=\.)\s+", p.prompt):
+            m = re.match(r"(.+?) has (\d+) ", s)
+            if m and " are " not in s: state[m.group(1).lower()] = int(m.group(2))
+        for s in re.split(r"(?<=\.)\s+", p.prompt):
+            if (m := re.match(r"(\d+) \w+ are added to (.+?)\.", s)):
+                state[m.group(2).lower()] = state.get(m.group(2).lower(), 0) + int(m.group(1))
+            elif (m := re.match(r"(\d+) \w+ are removed from (.+?)\.", s)):
+                state[m.group(2).lower()] = state.get(m.group(2).lower(), 0) - int(m.group(1))
+            elif (m := re.match(r"(\d+) \w+ are moved from (.+?) to (.+?)\.", s)):
+                k = int(m.group(1))
+                state[m.group(2).lower()] = state.get(m.group(2).lower(), 0) - k
+                state[m.group(3).lower()] = state.get(m.group(3).lower(), 0) + k
+        mq = re.search(r"are in (.+?) now\?", p.prompt)
+        return str(state.get(mq.group(1).lower()))
+
+    fooled = 0
+    for diff in range(1, 6):
+        for seed in range(40):
+            dist = generators._mk(family, diff, seed, 0, True, "distractor", "g")
+            base = generators._mk(family, diff, seed, 0, False, "base", "g")
+            if dist.prompt == base.prompt:
+                continue
+            if naive_answer(dist) != dist.gold:
+                fooled += 1
+    assert fooled > 0, f"{family}: relevance-blind solver was never fooled — distractor still inert"
+
+
 def test_sequences_capped_at_tier_6():
     # tier 6 (cubic) is the hardest rule; asking for more must not silently reuse it
     ds = generators.build_dataset(["sequences"], 1, 9, 3, verify=True)
