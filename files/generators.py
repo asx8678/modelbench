@@ -586,22 +586,39 @@ def gen_logic_grid(difficulty, structure_seed, surface_seed, distractor):
 
 
 # ---------------------------------------------------------- 7. composed
-# Chain three genuinely load-bearing hops: a knights_knaves knight-count K
-# (deduced, never printed) seeds an arithmetic chain -> R; solving an ordering
-# yields C, the position of a named inhabitant; the final gold is R * C, so a
-# slip in ANY hop changes the answer. Every hop is embedded so each can be
-# verified independently.
+# A 5-hop cascade (H6 / bench-32g) where an early slip changes a later OPERATION,
+# not just a magnitude, so stochastic guessing collapses:
+#   Stage 1 (knights)   : deduce the knight count K (never printed).
+#   Stage 2 (arithmetic): a chain seeded by K -> R.
+#   Stage 3 (ordering)  : solve the ordering -> C, a named pivot's 1-indexed position.
+#   Stage 4 (op-gate)   : the PARITY of R selects + vs × between R and C -> F. A
+#                         1-unit slip in R flips its parity, so it selects the WRONG
+#                         operator here -- the error is amplified, not averaged out.
+#   Stage 5 (op-gate)   : the PARITY of C selects + vs × between F and R -> G (gold).
+# Each hop is embedded so the verifier re-derives it independently; the gate
+# operators are read from the prompt text (and randomized per item, so a model
+# cannot assume "even -> add").
+
+def _composed_gate_ops(stage_text, var):
+    """Parse an op-gate stage's two branches:
+        'If <var> is even, let <T> = <L> <op1> <R>. If <var> is odd, ... <op2> ...'
+    Return (op_even_fn, op_odd_fn) as 2-arg callables, or (None, None)."""
+    ops = {"+": lambda a, b: a + b, "×": lambda a, b: a * b}
+    me = re.search(rf"If {var} is even, let \w+ = \w+ ([+×]) \w+", stage_text)
+    mo = re.search(rf"If {var} is odd, let \w+ = \w+ ([+×]) \w+", stage_text)
+    if not me or not mo:
+        return None, None
+    return ops.get(me.group(1)), ops.get(mo.group(1))
+
 
 def _composed_parse_hops(prompt):
-    """Return dict: knights_prompt, arith_prompt, arith_subj, order_block, pivot.
-
-    All three stages are load-bearing. Stage 1 (knights) yields a count K that
-    seeds Stage 2 (arithmetic -> R). Stage 3 (ordering) yields C, the position
-    of `pivot`; the gold is R * C. The parser extracts each stage from the
-    prompt text so the verifier can re-derive every hop independently.
+    """Return dict: knights_prompt, arith_prompt, arith_subj, order_block, pivot,
+    gate4, gate5. Each stage is bounded so the verifier can re-derive every hop
+    independently (knights -> K, arithmetic -> R, ordering -> C, gate4 -> F, gate5 -> G).
     """
     m = re.search(
-        r"Stage 1:\s*(.+?)\n+Stage 2:\s*(.+?)\n+Stage 3:\s*(.+)$",
+        r"Stage 1:\s*(.+?)\n+Stage 2:\s*(.+?)\n+Stage 3:\s*(.+?)"
+        r"\n+Stage 4:\s*(.+?)\n+Stage 5:\s*(.+)$",
         prompt, re.S,
     )
     if not m:
@@ -623,6 +640,8 @@ def _composed_parse_hops(prompt):
         "arith_subj": arith_subj,
         "order_block": stage3,
         "pivot": pivot,
+        "gate4": m.group(4).strip(),
+        "gate5": m.group(5).strip(),
     }
 
 
@@ -649,8 +668,18 @@ def _verify_composed(prompt, gold):
     if not pivot or order is None or pivot not in order:
         return False
     count_c = order.index(pivot) + 1
+    # Hop D: the parity of R selects the operator combining R and C -> F.
+    op4_e, op4_o = _composed_gate_ops(parsed.get("gate4", ""), "R")
+    if op4_e is None:
+        return False
+    f_val = (op4_e if arith_result % 2 == 0 else op4_o)(arith_result, count_c)
+    # Hop E: the parity of C selects the operator combining F and R -> G (gold).
+    op5_e, op5_o = _composed_gate_ops(parsed.get("gate5", ""), "C")
+    if op5_e is None:
+        return False
+    g_val = (op5_e if count_c % 2 == 0 else op5_o)(f_val, arith_result)
     try:
-        return int(gold) == arith_result * count_c
+        return int(gold) == g_val
     except (TypeError, ValueError):
         return False
 
@@ -733,18 +762,21 @@ def _verify_order_raw(prompt, query):
 
 
 def gen_composed(difficulty, structure_seed, surface_seed, distractor):
-    """Chain three genuinely load-bearing hops: knights -> arithmetic -> ordering.
+    """Chain five load-bearing hops: knights -> arithmetic -> ordering -> two op-gates.
 
     Every hop affects the final integer, so none can be skipped:
       * Hop A (knights): the model must DEDUCE the knight count K. K is never
         printed -- Stage 2 refers to it only as "as many ... as there are
-        knights". K is forced >= 1 so the arithmetic start (and the final
-        product) is non-zero.
+        knights". K is forced >= 1 so the arithmetic start is non-zero.
       * Hop B (arithmetic): a chain seeded by K produces R.
       * Hop C (ordering): solving the ordering yields C, the 1-indexed position
-        of a named inhabitant. The final answer is R * C.
-    A one-unit slip in ANY hop changes the gold. There is no modulo wrap to
-    mask arithmetic drift, and no stage is a labelled distractor.
+        of a named inhabitant.
+      * Hop D (op-gate): the PARITY of R selects + vs × between R and C -> F.
+      * Hop E (op-gate): the PARITY of C selects + vs × between F and R -> G (gold).
+    A one-unit slip in an EARLY hop flips a parity and so selects the WRONG
+    OPERATOR downstream -- the error is amplified, not just shifted by one. The
+    two gates' operators are randomized per item (even -> + or ×), so a model
+    must read each gate, and there is no labelled distractor stage.
     """
     rs = _rng("composed-struct", difficulty, structure_seed)
     ru = _rng("composed-surf", structure_seed, surface_seed)
@@ -794,8 +826,7 @@ def gen_composed(difficulty, structure_seed, surface_seed, distractor):
     arith_result = current
 
     # Hop C: ordering. Solving it yields C = the 1-indexed position (from the
-    # top) of a named inhabitant; the final answer is R * C, so a slip in the
-    # ordering changes the gold (no modulo wrap to mask drift).
+    # top) of a named inhabitant.
     order_diff = max(1, difficulty)
     order_struct = rs.randint(0, 2 ** 16)
     order_prompt, _order_gold, _order_at, order_names = gen_order(
@@ -806,7 +837,16 @@ def gen_composed(difficulty, structure_seed, surface_seed, distractor):
     pivot_idx = rs.randint(1, n_people - 1)  # C in 2..n_people (never identity)
     pivot_name = order_names[pivot_idx]
     count_c = pivot_idx + 1
-    gold = str(arith_result * count_c)
+
+    # Hops D & E: parity-gated operator selection. Each gate's two operators are a
+    # distinct {+, ×} pair drawn per item, so the model must READ the gate (it
+    # cannot assume even -> add) and a parity slip upstream selects the wrong one.
+    apply_op = {"+": lambda a, b: a + b, "×": lambda a, b: a * b}
+    g4_even, g4_odd = rs.sample(["+", "×"], 2)
+    f_val = apply_op[g4_even if arith_result % 2 == 0 else g4_odd](arith_result, count_c)
+    g5_even, g5_odd = rs.sample(["+", "×"], 2)
+    g_val = apply_op[g5_even if count_c % 2 == 0 else g5_odd](f_val, arith_result)
+    gold = str(g_val)
 
     prompt = (
         "Stage 1: " + kk_block + "\n"
@@ -816,8 +856,10 @@ def gen_composed(difficulty, structure_seed, surface_seed, distractor):
         f"Let R be how many {arith_item} {arith_name} has at the end of Stage 2.\n\n"
         "Stage 3: " + order_clauses + "\n"
         f"Counting the {sup_hi} as position 1, what is {pivot_name}'s position "
-        "in this ordering? Call it C. Your final answer is R multiplied by C. "
-        "What is R times C?"
+        "in this ordering? Call it C.\n\n"
+        f"Stage 4: If R is even, let F = R {g4_even} C. If R is odd, let F = R {g4_odd} C.\n\n"
+        f"Stage 5: If C is even, let G = F {g5_even} R. If C is odd, let G = F {g5_odd} R. "
+        "What is G?"
     )
     return prompt, gold, "int", None
 

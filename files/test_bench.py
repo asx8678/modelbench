@@ -567,14 +567,14 @@ def test_no_degenerate_constant_gold(family, diff):
 
 
 def test_composed_gold_verifies_end_to_end():
-    # The composed chain (knights -> arithmetic -> ordering) must produce a gold
-    # that the independent verifier re-derives from the prompt text.
+    # The composed cascade (knights -> arithmetic -> ordering -> two op-gates) must
+    # produce a gold that the independent verifier re-derives from the prompt text.
     p = generators._mk("composed", 3, 7, 0, False, "base", "g")
     assert generators.verify_gold(p) is True
-    # Sanity: prompt has all three (load-bearing) stages.
-    assert "Stage 1:" in p.prompt and "Stage 2:" in p.prompt and "Stage 3:" in p.prompt
-    # The final answer is R * C (arithmetic result times an ordering position),
-    # an unbounded integer >= 2 (K is forced >= 1, C >= 2).
+    # Sanity: prompt has all five (load-bearing) stages.
+    for st in ("Stage 1:", "Stage 2:", "Stage 3:", "Stage 4:", "Stage 5:"):
+        assert st in p.prompt, st
+    # The final answer G is an unbounded integer >= 2 (K >= 1, C >= 2, F >= 2).
     assert p.answer_type == "int"
     assert int(p.gold) >= 2
     # bench-o6o: the knight count must be DEDUCED, never printed, and no stage
@@ -586,8 +586,8 @@ def test_composed_gold_verifies_end_to_end():
 
 def test_composed_perturb_hop_a_changes_final_gold():
     # Perturbing the first hop (knights count) must propagate through the
-    # arithmetic hop and change the final gold (R * C, with C fixed): a
-    # different knight count yields a different R, hence a different product.
+    # arithmetic hop and change R: a different knight count yields a different R,
+    # which feeds (and whose parity selects an operator in) the downstream gates.
     p = generators._mk("composed", 3, 7, 0, False, "base", "g")
     parsed = generators._composed_parse_hops(p.prompt)
     names, stmts = generators._kk_parse(parsed["knights_prompt"])
@@ -632,23 +632,61 @@ def test_composed_perturb_hop_a_changes_final_gold():
 
 
 def test_composed_hop_c_is_load_bearing():
-    # bench-o6o: the ordering hop (Stage 3) genuinely contributes. The gold is
-    # R * C where C is the re-derived 1-indexed position of the named pivot, so
-    # a different ordering outcome (different C) changes the answer -- Stage 3
-    # cannot be skipped.
+    # H6/bench-32g: the ordering hop (Stage 3) genuinely contributes. C feeds gate 4
+    # (R op C) and its PARITY selects gate 5's operator, so a different ordering
+    # outcome (different C) changes the gold -- Stage 3 cannot be skipped.
     p = generators._mk("composed", 4, 11, 0, False, "base", "g")
     assert generators.verify_gold(p) is True
     parsed = generators._composed_parse_hops(p.prompt)
     order, _ = generators._verify_order_raw(parsed["order_block"], "")
     assert order is not None and parsed["pivot"] in order
     c = order.index(parsed["pivot"]) + 1
-    assert c >= 2                                    # multiply is never identity
+    assert c >= 2
     kk_names, kk_stmts = generators._kk_parse(parsed["knights_prompt"])
     k = sum(1 for v in generators._kk_all_solutions(kk_names, kk_stmts)[0].values() if v)
     r = generators._verify_arithmetic_raw(parsed["arith_prompt"], k)
     assert r is not None and r >= 1
-    assert int(p.gold) == r * c                      # gold is a function of C
-    assert r * (c - 1) != int(p.gold)                # changing C by 1 changes it
+
+    def cascade(r_, c_):
+        e4, o4 = generators._composed_gate_ops(parsed["gate4"], "R")
+        f = (e4 if r_ % 2 == 0 else o4)(r_, c_)
+        e5, o5 = generators._composed_gate_ops(parsed["gate5"], "C")
+        return (e5 if c_ % 2 == 0 else o5)(f, r_)
+
+    assert int(p.gold) == cascade(r, c)              # gold is the cascade's output
+    assert cascade(r, c - 1) != int(p.gold)          # changing C by 1 changes the gold
+
+
+def test_composed_early_slip_changes_a_later_operation():
+    # H6/bench-32g: the defining property -- a 1-unit slip in an EARLY hop flips a
+    # parity and so selects a DIFFERENT OPERATOR downstream, not just a shifted
+    # magnitude. We verify both halves: (a) each gate assigns different operators to
+    # its even/odd branches, and (b) recomputing with R off by one selects the other
+    # operator and yields a gold that differs by more than a unit (so a magnitude-
+    # only guesser collapses).
+    amplified = 0
+    for seed in range(40):
+        p = generators._mk("composed", 4, seed, 0, False, "base", "g")
+        parsed = generators._composed_parse_hops(p.prompt)
+        e4, o4 = generators._composed_gate_ops(parsed["gate4"], "R")
+        e5, o5 = generators._composed_gate_ops(parsed["gate5"], "C")
+        assert e4(3, 5) != o4(3, 5)                  # even/odd branches use different ops
+        assert e5(3, 5) != o5(3, 5)
+        kk = generators._kk_parse(parsed["knights_prompt"])
+        r = generators._verify_arithmetic_raw(
+            parsed["arith_prompt"],
+            sum(1 for v in generators._kk_all_solutions(*kk)[0].values() if v))
+        order, _ = generators._verify_order_raw(parsed["order_block"], "")
+        c = order.index(parsed["pivot"]) + 1
+
+        def cascade(rr, cc):
+            f = (e4 if rr % 2 == 0 else o4)(rr, cc)
+            return (e5 if cc % 2 == 0 else o5)(f, rr)
+
+        assert cascade(r, c) == int(p.gold)
+        if abs(cascade(r + 1, c) - cascade(r, c)) > 1:   # parity slip -> operator change
+            amplified += 1
+    assert amplified > 0, "an early parity slip never amplified into an operator change"
 
 
 # ------------------------------------------------------------------ grading (#1)
