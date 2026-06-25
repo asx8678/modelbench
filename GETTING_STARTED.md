@@ -7,35 +7,41 @@ for every flag, see the [operator manual](files/README.md).
 > **TL;DR**
 > ```bash
 > cd files
-> pip install -r requirements.txt
-> python cli.py start          # interactive: pick a model, build a set, run, report
+> uv sync                              # create the env + install deps
+> uv run python cli.py start           # interactive: pick a model, build a set, run, report
 > ```
 
 All commands run from the **`files/`** directory.
 
-> **`python` vs `python3`:** the examples use `python`. If your shell says
-> `command not found: python`, just use `python3` instead — everything else is identical.
+> **Why `uv run`?** It runs the command inside the project's environment without you
+> activating anything, and uv fetches a suitable Python automatically — so there's no
+> `python` vs `python3` to worry about. Prefer a bare `python cli.py …`? Activate the env
+> once with `source .venv/bin/activate`, then drop the `uv run` prefix.
 
 ---
 
 ## 1. Install
 
-Needs Python 3.9+ and two packages (`numpy`, plus `matplotlib` only for the PNG charts):
+Install [uv](https://docs.astral.sh/uv/) if you don't have it
+(`curl -LsSf https://astral.sh/uv/install.sh | sh`), then let it build the environment
+and install the dependencies (`numpy`, `matplotlib`, `pytest`) in one step:
 
 ```bash
 cd files
-pip install -r requirements.txt
+uv sync
 ```
 
-The runner itself is pure standard library and talks to any **OpenAI-compatible**
-`/chat/completions` endpoint — Ollama, vLLM, LM Studio, llama.cpp, TGI, and hosted APIs.
+uv reads `pyproject.toml`, creates a `.venv`, pins exact versions in `uv.lock`, and will
+fetch a suitable Python (3.9+) for you if you don't have one. The runner itself is pure
+standard library and talks to any **OpenAI-compatible** `/chat/completions` endpoint —
+Ollama, vLLM, LM Studio, llama.cpp, TGI, and hosted APIs.
 
 ---
 
 ## 2. Launch — one command
 
 ```bash
-python cli.py start          # or just: python cli.py
+uv run python cli.py start          # or just: uv run python cli.py
 ```
 
 `start` walks you through the whole thing interactively:
@@ -58,10 +64,10 @@ Sanity-check the whole pipeline using a built-in deterministic mock that synthes
 answers — no server, no API key:
 
 ```bash
-python cli.py generate --db bench.db --max-diff 4 --reps 4 --distractor
-python cli.py run      --db bench.db --mock noisy --run-id smoke --confidence --samples 3
-python cli.py dashboard --db bench.db --runs smoke          # pretty terminal view
-python cli.py report   --db bench.db --runs smoke --out report_smoke   # PNG + CSV + md
+uv run python cli.py generate --db bench.db --max-diff 4 --reps 4 --distractor
+uv run python cli.py run      --db bench.db --mock noisy --run-id smoke --confidence --samples 3
+uv run python cli.py dashboard --db bench.db --runs smoke          # pretty terminal view
+uv run python cli.py report   --db bench.db --runs smoke --out report_smoke   # PNG + CSV + md
 ```
 
 If the dashboard paints and `report_smoke/` gets written, the install is healthy and
@@ -80,8 +86,8 @@ them directly, or register them once in `providers.json` and use a short alias.
 ollama serve            # in another terminal
 ollama pull llama3.2:3b
 
-python cli.py generate --db bench.db --reps 12 --distractor --surface-variants 3
-python cli.py run --db bench.db \
+uv run python cli.py generate --db bench.db --reps 12 --distractor --surface-variants 3
+uv run python cli.py run --db bench.db \
     --base-url http://localhost:11434/v1 \
     --model llama3.2:3b --run-id llama32 \
     --confidence --workers 4 --temperature 0
@@ -90,7 +96,7 @@ python cli.py run --db bench.db \
 ### Local — vLLM
 
 ```bash
-python cli.py run --db bench.db \
+uv run python cli.py run --db bench.db \
     --base-url http://localhost:8000/v1 \
     --model google/gemma-3-1b-it --run-id gemma31 --api-key EMPTY --confidence
 ```
@@ -99,7 +105,7 @@ python cli.py run --db bench.db \
 
 ```bash
 export OPENAI_API_KEY=sk-...
-python cli.py run --db bench.db \
+uv run python cli.py run --db bench.db \
     --base-url https://api.openai.com/v1 \
     --model gpt-4o-mini --run-id gpt4omini --confidence
 ```
@@ -120,11 +126,11 @@ Add an entry to `files/providers.json`:
 ```
 
 ```bash
-python cli.py models                              # list configured aliases
-python cli.py run --db bench.db --model gpt4omini --run-id gpt4omini --confidence
+uv run python cli.py models                              # list configured aliases
+uv run python cli.py run --db bench.db --model gpt4omini --run-id gpt4omini --confidence
 ```
 
-`python cli.py setup` is the same registration wizard `start` uses, on its own.
+`uv run python cli.py setup` is the same registration wizard `start` uses, on its own.
 
 Useful `run` knobs: `--samples N` (enables `pass@k` / `maj@k` / self-consistency),
 `--temperature 0` (cleanest single-shot signal), `--confidence` (enables calibration),
@@ -138,7 +144,7 @@ items). Re-running the same `--run-id` overwrites its rows, so it never double-c
 ### Terminal dashboard (no image viewer needed)
 
 ```bash
-python cli.py dashboard --db bench.db --runs llama32
+uv run python cli.py dashboard --db bench.db --runs llama32
 ```
 
 ```text
@@ -167,7 +173,7 @@ ASCII when piped to a file.
 ### Full report (charts + spreadsheet)
 
 ```bash
-python cli.py report --db bench.db --runs llama32 --out report
+uv run python cli.py report --db bench.db --runs llama32 --out report
 # -> report/report.md, degradation.png, distractibility.png, …, metrics.csv
 ```
 
@@ -181,8 +187,8 @@ edit `metrics.py`) without spending tokens again.
 Run two models over the **same** dataset, then pass both run-ids:
 
 ```bash
-python cli.py dashboard --db bench.db --runs llama32 gemma31   # side-by-side leaderboard
-python cli.py report    --db bench.db --runs llama32 gemma31 --out report
+uv run python cli.py dashboard --db bench.db --runs llama32 gemma31   # side-by-side leaderboard
+uv run python cli.py report    --db bench.db --runs llama32 gemma31 --out report
 ```
 
 The dashboard's compare view scales each row's meters so the **best run has the longest
@@ -195,15 +201,15 @@ means any gap is reasoning, not a contamination/memorization artifact.
 
 | Command | What it does |
 |---|---|
-| `python cli.py start` | Interactive launcher: pick/add a model → dataset → run → report → dashboard. |
-| `python cli.py setup` | Register a model + endpoint (wizard), writes `providers.json`. |
-| `python cli.py generate` | Build a procedurally-generated problem set into a SQLite DB. |
-| `python cli.py run` | Run a model (or `--mock`) over the dataset; stores graded responses. |
-| `python cli.py dashboard` | Rich in-terminal stats / multi-run comparison. |
-| `python cli.py report` | Metrics + accessible PNG charts + `metrics.csv` + `report.md`. |
-| `python cli.py list` | List runs in a DB. |
-| `python cli.py models` / `providers` | List configured aliases / endpoints. |
-| `python cli.py families` | List problem families and their probe support. |
+| `uv run python cli.py start` | Interactive launcher: pick/add a model → dataset → run → report → dashboard. |
+| `uv run python cli.py setup` | Register a model + endpoint (wizard), writes `providers.json`. |
+| `uv run python cli.py generate` | Build a procedurally-generated problem set into a SQLite DB. |
+| `uv run python cli.py run` | Run a model (or `--mock`) over the dataset; stores graded responses. |
+| `uv run python cli.py dashboard` | Rich in-terminal stats / multi-run comparison. |
+| `uv run python cli.py report` | Metrics + accessible PNG charts + `metrics.csv` + `report.md`. |
+| `uv run python cli.py list` | List runs in a DB. |
+| `uv run python cli.py models` / `providers` | List configured aliases / endpoints. |
+| `uv run python cli.py families` | List problem families and their probe support. |
 
 Add `-h` to any command for its full options.
 
@@ -211,12 +217,13 @@ Add `-h` to any command for its full options.
 
 ## 8. Notes & troubleshooting
 
-- **`command not found: python`** → use `python3` (and `pip3`).
+- **`uv: command not found`** → install it: `curl -LsSf https://astral.sh/uv/install.sh | sh`,
+  then restart your shell. (No need to manage `python` vs `python3` — `uv run` handles it.)
 - **A real model scores 0 everywhere** → it's probably ignoring the `ANSWER:` format.
   Spot-check raw responses: `sqlite3 bench.db "SELECT raw FROM responses LIMIT 5"`. The
   `grading_fragility` metric quantifies how much the score leans on fallback parsing.
-- **No charts** → `report` needs matplotlib (`pip install matplotlib`); the **dashboard
-  needs nothing extra** and still works.
+- **No charts** → `report` needs matplotlib, which `uv sync` installs automatically; the
+  **dashboard needs nothing extra** and works regardless.
 - **Run interrupted** → re-run with `--resume` to skip finished items (errored items are
   retried). Same `--run-id` overwrites rather than duplicating.
 - **Sizing** → `--reps 20 --distractor --surface-variants 3` over difficulties 1–6 and
@@ -230,4 +237,4 @@ Add `-h` to any command for its full options.
   design rationale (generated-not-scraped, gold-by-construction, etc.).
 - **[files/README.md](files/README.md)** — the in-depth operator manual: every flag,
   metric definitions, accessibility notes, and how to add your own problem family.
-- **Run the tests** (no model/network needed): `cd files && pip install pytest && pytest -q`.
+- **Run the tests** (no model/network needed): `cd files && uv run pytest -q`.

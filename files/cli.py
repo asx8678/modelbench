@@ -487,8 +487,8 @@ def cmd_start(a):
         cmd_report(_parse_args(["report", "--db", db, "--runs", run_id, "--out", out]))
     except (ImportError, ModuleNotFoundError):
         charts = False
-        print(f"\n(PNG charts need matplotlib: pip install matplotlib "
-              f"&& python cli.py report --db {db} --runs {run_id})")
+        print(f"\n(PNG charts need matplotlib — `uv sync` installs it; then re-run: "
+              f"uv run python cli.py report --db {db} --runs {run_id})")
 
     # 5) terminal dashboard — the at-a-glance visual finale (stdlib only, no
     # matplotlib). Best-effort: a run with nothing scorable must not abort start.

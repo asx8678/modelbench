@@ -18,7 +18,7 @@ problems.
 
 > **Just want to run it?** → **[GETTING_STARTED.md](GETTING_STARTED.md)** is a
 > copy-paste walkthrough: install, launch, point it at a model, and read the results.
-> The 30-second version: `cd files && pip install -r requirements.txt && python cli.py start`.
+> The 30-second version: `cd files && uv sync && uv run python cli.py start`.
 
 ---
 
@@ -124,10 +124,18 @@ Run `python files/cli.py families` to print the live support matrix.
 
 ## Install
 
+This project uses [uv](https://docs.astral.sh/uv/). One command creates the environment
+and installs the dependencies (`numpy`, `matplotlib`, `pytest`):
+
 ```bash
 cd files
-pip install -r requirements.txt   # numpy + matplotlib (matplotlib only needed for `report`)
+uv sync
 ```
+
+Run the commands below with the `uv run` prefix (e.g. `uv run python cli.py start`), or
+activate the environment once with `source .venv/bin/activate` and drop the prefix — the
+examples that follow use the bare `python cli.py …` form. (No uv yet?
+`curl -LsSf https://astral.sh/uv/install.sh | sh`.)
 
 The runner itself uses only the Python standard library and talks to any
 **OpenAI-compatible** `/chat/completions` endpoint — covering Ollama, vLLM, LM
@@ -143,8 +151,8 @@ with a live progress bar, and writes the report — start to finish:
 
 ```bash
 cd files
-pip install -r requirements.txt
-python cli.py start          # or just: python cli.py
+uv sync
+uv run python cli.py start          # or just: uv run python cli.py
 ```
 
 `start` walks you through everything:
@@ -414,7 +422,8 @@ bench/
     ├── dashboard.py           dependency-free terminal dashboard + run comparison
     ├── providers.py           provider/model registry loader + resolver
     ├── providers.json         the endpoints + model aliases you edit
-    ├── requirements.txt       numpy + matplotlib (+ pytest for dev)
+    ├── pyproject.toml         deps (numpy, matplotlib) + dev group (pytest), uv-managed
+    ├── uv.lock                pinned, reproducible dependency lockfile
     ├── README.md              in-depth operator manual
     ├── test_*.py              pytest suite (no model or network needed)
     └── fixtures/ patches/     test fixtures and patch artifacts
@@ -439,9 +448,10 @@ Everything else (storage, running, metrics, charts) picks it up automatically.
 
 ```bash
 cd files
-pip install pytest
-pytest -q   # generators, CSP uniqueness, grading, error/dup handling, metrics, registry
+uv run pytest -q   # generators, CSP uniqueness, grading, error/dup handling, metrics, registry
 ```
+
+`pytest` is in the `dev` dependency group, so `uv sync` already installed it.
 
 The suite drives the full pipeline through the deterministic mock — no model,
 network, or matplotlib required. Every generated gold is independently re-derived

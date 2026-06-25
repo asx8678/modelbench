@@ -1,0 +1,20 @@
+[project]
+name = "reasoning-bench"
+version = "0.1.0"
+description = "A contamination-proof harness for measuring how well an LLM reasons."
+requires-python = ">=3.9"
+dependencies = [
+    "numpy>=1.24",       # metrics
+    "matplotlib>=3.7",   # report charts only (imported lazily by report.py)
+]
+# The runner, generators, grading, storage, and dashboard use only the standard library.
+
+[dependency-groups]
+dev = [
+    "pytest>=7.0",       # uv run pytest -q
+]
+
+# The benchmark is a set of flat scripts run via `python cli.py`, not an installable
+# package, so uv manages the environment without trying to build the project itself.
+[tool.uv]
+package = false

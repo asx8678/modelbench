@@ -47,9 +47,15 @@ The four numeric families (`arithmetic`, `state_tracking`, `ordering`, `sequence
 
 ## Install
 
+This project uses [uv](https://docs.astral.sh/uv/). `uv sync` creates a `.venv` and
+installs the dependencies (`numpy`, `matplotlib`, `pytest`) pinned by `uv.lock`:
+
 ```bash
-pip install -r requirements.txt        # numpy + matplotlib (only needed for `report`)
+uv sync
 ```
+
+Prefix the commands below with `uv run` (e.g. `uv run python cli.py start`), or
+`source .venv/bin/activate` once and use the bare `python cli.py …` form shown here.
 
 The runner itself uses only the standard library and talks to any **OpenAI-compatible**
 `/chat/completions` endpoint — which covers Ollama, vLLM, LM Studio, llama.cpp, TGI,
@@ -337,6 +343,7 @@ report.py       accessible charts + CSV + Markdown
 dashboard.py    dependency-free terminal dashboard + multi-run comparison
 providers.py    provider/model registry loader + resolver
 providers.json  the endpoints + model aliases you edit (or let `setup` write)
+pyproject.toml  dependencies (numpy, matplotlib) + dev group (pytest); uv.lock pins them
 cli.py          start / setup / generate / run / report / dashboard / list / families / providers / models
 test_bench.py   pytest suite (no model or network needed)
 ```
@@ -344,8 +351,7 @@ test_bench.py   pytest suite (no model or network needed)
 ## Testing
 
 ```bash
-pip install pytest
-pytest -q          # generators, CSP uniqueness, grading, error/dup handling, metrics, registry
+uv run pytest -q   # generators, CSP uniqueness, grading, error/dup handling, metrics, registry
 ```
 
 The suite drives the full pipeline through the deterministic mock, so it needs no model,
