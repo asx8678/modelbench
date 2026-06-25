@@ -186,12 +186,22 @@ def gen_retroactive_edit(difficulty, structure_seed, surface_seed, distractor):
                 k = rs.randint(1, state[i]); state[i] -= k; state[j] += k
                 clauses.append(f"{k} {item} are moved from {names[i]} to {names[j]}.")
 
-    # Retroactive edit: a late clause says one container held a multiple of its
-    # originally stated amount. Only increase to keep later operations valid.
+    # Retroactive edit: a late clause says one container held a multiple
+    # of its originally stated amount. Vary the factor (not just ×2/×3)
+    # to break the pattern-matchable trigger, and target a container
+    # that participates in a LATER structural op so the edit must
+    # propagate to the final state.
     edit_i = rs.randrange(3)
-    factor = rs.choice([2, 3])
+    factor = rs.choice([2, 3, 4, 5])
     edit_clause = f"Actually, {names[edit_i].lower()} held {factor} times as many {item} as originally stated."
+    # Ensure downstream dependence: if the last structural op does not
+    # touch edit_i, append a no-op add to it so the factor must be
+    # carried through a later op.
     clauses.insert(-1, edit_clause)
+    last_s = clauses[-1] if clauses[-1] != edit_clause else clauses[-2]
+    if not re.search(re.escape(names[edit_i].lower()), last_s, re.I):
+        k = rs.randint(1, 3)
+        clauses.append(f"{k} {item} are added to {names[edit_i]}.")
 
     qi = rs.randrange(3)
     if distractor:
