@@ -90,11 +90,15 @@ def gen_arithmetic(difficulty, structure_seed, surface_seed, distractor):
             op = "add"
         if op == "add":
             k = rs.randint(2, 15); current += k
-            verb = rs.choice(["buys", "finds", "is given", "picks up"])
+            # Verb is purely cosmetic, so draw it from the SURFACE rng (E8): this
+            # makes surface variants vary the phrasing, not just names/items, so
+            # the invariance probe tests lexical robustness too. The gold is set by
+            # rs (magnitudes/ops) and stays fixed across a grp's surface variants.
+            verb = ru.choice(["buys", "finds", "is given", "picks up"])
             clauses.append(f"{name} {verb} {k} more {item}.")
         elif op == "sub":
             k = rs.randint(1, current - 1); current -= k
-            verb = rs.choice(["gives away", "loses", "uses", "drops"])
+            verb = ru.choice(["gives away", "loses", "uses", "drops"])
             clauses.append(f"{name} {verb} {k} {item}.")
         elif op == "mul":
             f = rs.choice([2, 3]); current *= f

@@ -190,6 +190,25 @@ def test_naive_solver_now_fails_on_distractor(family):
     assert fooled > 0, f"{family}: relevance-blind solver was never fooled — distractor still inert"
 
 
+def test_surface_variants_vary_phrasing_hold_gold():
+    # bench-1s0 / E8: surface variants must hold the gold fixed (matched-pair flip
+    # metric) AND actually vary cosmetic surface beyond names — verb phrasing now
+    # comes from the surface rng, so at least some grp shows >1 distinct verb.
+    verbs = ("buys", "finds", "is given", "picks up", "gives away", "loses", "uses", "drops")
+    saw_lexical_variation = False
+    for diff in range(2, 6):
+        for seed in range(30):
+            grp = [generators._mk("arithmetic", diff, seed, s, False,
+                                  "base" if s == 0 else "surface", "g")
+                   for s in range(4)]
+            golds = {p.gold for p in grp}
+            assert len(golds) == 1, (diff, seed, golds)   # gold invariant across the grp
+            used = [{v for v in verbs if re.search(rf"\b{v}\b", p.prompt)} for p in grp]
+            if len({frozenset(u) for u in used}) > 1:
+                saw_lexical_variation = True
+    assert saw_lexical_variation, "surface variants never changed verb phrasing"
+
+
 def test_difficulty_axis_labels_are_honest():
     # bench-lop / E6: the difficulty axis is not the same quantity across families.
     # Tier/size families must be labelled distinctly from the default "reasoning steps".
