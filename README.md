@@ -74,7 +74,7 @@ apply:
 | `logic_grid` | **constraint satisfaction** — place N people on N floors | floors (diff+2, ≤7) |
 | `unsat_csp` | premise-flaw detection: controlled ill-posed knights-and-knaves puzzles | n (diff+2); brute-forced solution count |
 | `composed` | ≥3 execution-dependency hops (e.g. knights → arithmetic → ordering) | chain length / per-hop difficulty |
-| `redefined_ops` | arithmetic with counterfactually redefined operators | number of operations |
+| `redefined_ops` | arithmetic with counterfactually redefined operators; at difficulty ≥3 the same symbol changes meaning by **position** in the chain, or one operator is defined **compositionally** in terms of another | number of operations |
 | `dynamic_pivot` | **genuine backtracking**: turn 1 commits a count, turn 2 reveals the moves never happened, forcing a revision | number of updates before the pivot |
 | `false_lemma` | **premise-flaw trap**: a plausible-but-false "the total is conserved" note must be rejected, not trusted | number of updates |
 | `noise_haystack` | **high-similarity needle**: a real arithmetic chain buried under structurally-identical decoy chains about other people | number of operations / decoys |

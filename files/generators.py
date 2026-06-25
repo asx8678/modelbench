@@ -828,9 +828,31 @@ def gen_composed(difficulty, structure_seed, surface_seed, distractor):
 
 # ------------------------------------------------ 8. redefined_ops (counterfactual)
 # Arithmetic where the prompt redefines operators (e.g. "⊕ means a+b+3").
-# Gold computed by applying the redefined table; verifier replays from
-# prompt text. Stronger variants use non-commutative (order-sensitive)
-# operators and chain two distinct redefined ops in a single problem.
+# Gold computed by applying the redefined table; verifier replays from prompt text.
+# Beyond a fixed symbol->meaning table (which a model defeats by reading it once),
+# two stronger variants fire at difficulty >= 3 (H4 / bench-81k):
+#   * positional   : the SAME symbol's meaning depends on its POSITION in the chain
+#                    (its first N uses mean one rule; later uses mean another), so a
+#                    fixed lookup -- or the old i%2 alternation -- is wrong after use N.
+#   * compositional: one operator is defined IN TERMS OF another (a ⊗ b applies ⊕
+#                    twice), so a step cannot be applied without expanding the base op.
+# Both force genuine independent per-step application; the verifier re-derives the
+# position-aware / compositional semantics from the prompt text.
+_ROP_SYMS = ["⊕", "⊗", "⊖", "⊘", "⊙"]
+
+# Single-step operator phrasings. Each factory takes a bias and returns
+# (phrase, fn). Commutative (add/mul/double-sum) PLUS non-commutative
+# (order-sensitive subtract/modulo). The phrase ends in its bias integer and
+# carries no internal period, so the verifier can parse it back independently.
+_ROP_BANK = [
+    lambda b: (f"add the two numbers then add {b}",                      lambda a, y: a + y + b),
+    lambda b: (f"multiply the two numbers then subtract {b}",            lambda a, y: a * y - b),
+    lambda b: (f"double the sum of the two numbers, then add {b}",       lambda a, y: (a + y) * 2 + b),
+    lambda b: (f"subtract the right number from the left, then add {b}", lambda a, y: a - y + b),
+    lambda b: (f"take the left modulo the right, then add {b}",          lambda a, y: a % y + b),
+]
+
+
 def gen_redefined_ops(difficulty, structure_seed, surface_seed, distractor):
     rs = _rng("rops-struct", difficulty, structure_seed)
     ru = _rng("rops-surf", structure_seed, surface_seed)
@@ -838,62 +860,53 @@ def gen_redefined_ops(difficulty, structure_seed, surface_seed, distractor):
 
     name = ru.choice(NAMES)
     item = ru.choice(ITEMS)
-    # Stronger operator table: commutative (add+bias, mul-bias, add+double)
-    # PLUS non-commutative (order-sensitive) operators. Withholding the
-    # standard operator meaning forces the model to read the redefined
-    # table; a model that applies standard semantics scores at chance.
-    op_bank = [
-        (lambda sym, bias: (f"{sym} means add the two numbers then add {bias}",
-                             lambda a, b: a + b + bias)),
-        (lambda sym, bias: (f"{sym} means multiply the two numbers then subtract {bias}",
-                             lambda a, b: a * b - bias)),
-        (lambda sym, bias: (f"{sym} means double the sum of the two numbers, then add {bias}",
-                             lambda a, b: (a + b) * 2 + bias)),
-        # Non-commutative: subtraction from the LEFT operand (order-sensitive)
-        (lambda sym, bias: (f"{sym} means subtract the right number from the left, then add {bias}",
-                             lambda a, b: a - b + bias)),
-        (lambda sym, bias: (f"{sym} means take the left number, divide by the right, then add {bias}",
-                             lambda a, b: (a // b if b else 0) + bias if b else a + bias)),
-        # Modulo (non-commutative with the operand order)
-        (lambda sym, bias: (f"{sym} means take the left modulo the right, then add {bias}",
-                             lambda a, b: (a % b if b else 0) + bias if b else a + bias)),
-    ]
-    # Pick one or two distinct operators to chain. With difficulty >= 3
-    # we chain two distinct operators (alternating), forcing the model
-    # to apply each step independently.
-    use_chain = difficulty >= 3 and rs.random() < 0.5
-    if use_chain:
-        n_ops = 2
-        picks = rs.sample(range(len(op_bank)), 2)
-        op_syms = rs.sample(["⊕", "⊗", "⊖", "⊘", "⊙"], 2)
-        ops = []
-        for p, sym in zip(picks, op_syms):
-            bias = rs.randint(1, 4)
-            text, fn = op_bank[p](sym, bias)
-            ops.append((sym, text, fn))
-        # Alternate between the two ops across the difficulty steps
-        def make_apply(idx, current, k):
-            return ops[idx % 2][2](current, k)
-        op_descs = [ops[0][1], ops[1][1]]
-    else:
-        n_ops = 1
-        pick = rs.randrange(len(op_bank))
-        op_sym = rs.choice(["⊕", "⊗", "⊖", "⊘", "⊙"])
-        bias = rs.randint(1, 5)
-        op_text, op_fn = op_bank[pick](op_sym, bias)
-        ops = [(op_sym, op_text, op_fn)]
-        def make_apply(idx, current, k):
-            return op_fn(current, k)
-        op_descs = [ops[0][1]]
+    mode = rs.choice(["positional", "compositional"]) if difficulty >= 3 else "simple"
+
+    if mode == "simple":
+        sym = rs.choice(_ROP_SYMS)
+        phrase, fn = _ROP_BANK[rs.randrange(len(_ROP_BANK))](rs.randint(1, 5))
+        op_descs = [f"{sym} means {phrase}"]
+        step_syms = [sym] * difficulty
+        def evaluate(s, cur, k, counts):
+            return fn(cur, k)
+    elif mode == "positional":
+        # One symbol, two phases keyed on its use count. Distinct base ops so the
+        # phase change is load-bearing: a model that ignores position is wrong from
+        # use thresh+1 onward.
+        sym = rs.choice(_ROP_SYMS)
+        i1, i2 = rs.sample(range(len(_ROP_BANK)), 2)
+        ph1, fn1 = _ROP_BANK[i1](rs.randint(1, 5))
+        ph2, fn2 = _ROP_BANK[i2](rs.randint(1, 5))
+        thresh = 2
+        op_descs = [f"{sym} means: for its first {thresh} uses, {ph1}; "
+                    f"for every later use, {ph2}"]
+        step_syms = [sym] * difficulty
+        def evaluate(s, cur, k, counts):
+            return fn1(cur, k) if counts[s] <= thresh else fn2(cur, k)
+    else:  # compositional
+        base_sym, comp_sym = rs.sample(_ROP_SYMS, 2)
+        base_phrase, base_fn = _ROP_BANK[rs.randrange(len(_ROP_BANK))](rs.randint(1, 5))
+        op_descs = [f"{base_sym} means {base_phrase}",
+                    f"{comp_sym} means: apply {base_sym} to the two numbers, then apply "
+                    f"{base_sym} to that result and the right number"]
+        step_syms = [rs.choice([base_sym, comp_sym]) for _ in range(difficulty)]
+        if comp_sym not in step_syms:        # the composed op must be load-bearing
+            step_syms[rs.randrange(difficulty)] = comp_sym
+        def comp_fn(cur, k):
+            return base_fn(base_fn(cur, k), k)
+        fns = {base_sym: base_fn, comp_sym: comp_fn}
+        def evaluate(s, cur, k, counts):
+            return fns[s](cur, k)
+
     current = rs.randint(3, 15)
     clauses = [f"{name} starts with {current} {item}.",
                " ".join(f"In this problem, {t}." for t in op_descs)]
-    for i in range(difficulty):
+    counts = {}
+    for s in step_syms:
         k = rs.randint(2, 10)
-        sym = ops[i % len(ops)][0]
-        new = make_apply(i, current, k)
-        clauses.append(f"{name} {sym} {k} {item}.")
-        current = new
+        counts[s] = counts.get(s, 0) + 1
+        current = evaluate(s, current, k, counts)
+        clauses.append(f"{name} {s} {k} {item}.")
     if distractor:
         # Relevance-true NoOp (E1): the SAME subject, a DIFFERENT item, and no
         # operator symbol. Not separable by "different person"; the symbol-keyed
@@ -905,55 +918,83 @@ def gen_redefined_ops(difficulty, structure_seed, surface_seed, distractor):
 
 
 
-def _verify_redefined_ops(prompt, gold):
-    """Re-derive the answer by parsing the redefined operators from the
-    prompt text. Supports multiple distinct operator definitions
-    (chained ops) and non-commutative definitions.
+def _rop_phrase_fn(definition):
+    """Independently map a single-step operator phrase to its 2-arg function.
+
+    The bias is the phrase's trailing integer; the operation is keyed on a
+    distinctive substring. Returns None if the phrase is unrecognized. This is
+    the verifier's OWN re-derivation of the prompt wording (it shares no code
+    with the generator's _ROP_BANK), so a desync between text and gold is caught.
     """
-    # Parse all "X means Y" operator definitions
-    op_defs = {}  # sym -> callable
-    for m in re.finditer(r"(\S) means (.*?)\.", prompt):
+    nums = re.findall(r"\d+", definition)
+    if not nums:
+        return None
+    bias = int(nums[-1])
+    if "add the two numbers then add" in definition:
+        return lambda a, b: a + b + bias
+    if "multiply the two numbers then subtract" in definition:
+        return lambda a, b: a * b - bias
+    if "double the sum of the two numbers" in definition:
+        return lambda a, b: (a + b) * 2 + bias
+    if "subtract the right number from the left" in definition:
+        return lambda a, b: a - b + bias
+    if "take the left modulo the right" in definition:
+        return lambda a, b: (a % b if b else 0) + bias
+    return None
+
+
+def _verify_redefined_ops(prompt, gold):
+    """Re-derive the answer by parsing the redefined operators from the prompt
+    text. Supports three definition shapes: simple ("X means <phrase>"),
+    positional ("X means: for its first N uses, <p1>; for every later use, <p2>")
+    and compositional ("X means: apply Y to the two numbers, then apply Y to that
+    result and the right number"), plus non-commutative base phrases.
+    """
+    # op_defs[sym] = ("simple", fn) | ("pos", thresh, fn1, fn2) | ("comp", base_sym)
+    op_defs = {}
+    for m in re.finditer(r"(\S) means:? (.*?)\.", prompt):
         sym, definition = m.group(1), m.group(2)
-        if "add the two numbers then add" in definition:
-            bias = int(re.search(r"add (\d+)", definition).group(1))
-            op_defs[sym] = lambda a, b, bias=bias: a + b + bias
-        elif "multiply the two numbers then subtract" in definition:
-            bias = int(re.search(r"subtract (\d+)", definition).group(1))
-            op_defs[sym] = lambda a, b, bias=bias: a * b - bias
-        elif "double the sum of the two numbers, then add" in definition:
-            bias = int(re.search(r"add (\d+)", definition).group(1))
-            op_defs[sym] = lambda a, b, bias=bias: (a + b) * 2 + bias
-        elif "subtract the right number from the left, then add" in definition:
-            bias = int(re.search(r"add (\d+)", definition).group(1))
-            op_defs[sym] = lambda a, b, bias=bias: a - b + bias
-        elif "take the left number, divide by the right, then add" in definition:
-            bias = int(re.search(r"add (\d+)", definition).group(1))
-            def _div_op(a, b, bias=bias):
-                if not b:
-                    return a + bias
-                return a // b + bias
-            op_defs[sym] = _div_op
-        elif "take the left modulo the right, then add" in definition:
-            bias = int(re.search(r"add (\d+)", definition).group(1))
-            def _mod_op(a, b, bias=bias):
-                if not b:
-                    return a + bias
-                return a % b + bias
-            op_defs[sym] = _mod_op
+        pm = re.match(r"for its first (\d+) uses, (.*?); for every later use, (.*)", definition)
+        cm = re.match(r"apply (\S) to the two numbers, then apply \S to that result "
+                      r"and the right number", definition)
+        if pm:
+            f1, f2 = _rop_phrase_fn(pm.group(2)), _rop_phrase_fn(pm.group(3))
+            if not f1 or not f2:
+                return False
+            op_defs[sym] = ("pos", int(pm.group(1)), f1, f2)
+        elif cm:
+            op_defs[sym] = ("comp", cm.group(1))      # resolved against base below
+        else:
+            fn = _rop_phrase_fn(definition)
+            if not fn:
+                return False
+            op_defs[sym] = ("simple", fn)
     if not op_defs:
         return False
-    # Parse initial value
+    # Resolve compositional ops against their (already-parsed) base operator.
+    for sym, d in op_defs.items():
+        if d[0] == "comp":
+            base = op_defs.get(d[1])
+            if not base or base[0] != "simple":
+                return False
     mi = re.search(r"starts with (\d+)", prompt)
     if not mi:
         return False
     current = int(mi.group(1))
     sym_pattern = "|".join(re.escape(s) for s in op_defs)
-    op_iter = re.finditer(rf"(\S+) ({sym_pattern}) (\d+) (\S+)", prompt)
-    for m in op_iter:
-        name, sym, k, _item = m.group(1), m.group(2), int(m.group(3)), m.group(4)
-        if sym not in op_defs:
-            return False
-        current = op_defs[sym](current, k)
+    counts = {s: 0 for s in op_defs}
+    for m in re.finditer(rf"(\S+) ({sym_pattern}) (\d+) (\S+)", prompt):
+        sym, k = m.group(2), int(m.group(3))
+        d = op_defs[sym]
+        counts[sym] += 1
+        if d[0] == "simple":
+            current = d[1](current, k)
+        elif d[0] == "pos":
+            _, thresh, f1, f2 = d
+            current = f1(current, k) if counts[sym] <= thresh else f2(current, k)
+        else:  # comp: X(a,b) = base(base(a,b), b)
+            bf = op_defs[d[1]][1]
+            current = bf(bf(current, k), k)
     return str(current) == str(gold)
 
 

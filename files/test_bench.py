@@ -190,6 +190,54 @@ def test_naive_solver_now_fails_on_distractor(family):
     assert fooled > 0, f"{family}: relevance-blind solver was never fooled — distractor still inert"
 
 
+def _redefined_items(mode_key, diff=4, n=80):
+    """Generated redefined_ops items whose prompt is in the requested H4 mode."""
+    needle = "for its first" if mode_key == "positional" else "to that result and the right number"
+    return [p for seed in range(n)
+            if needle in (p := generators._mk("redefined_ops", diff, seed, 0, False, "base", "g")).prompt]
+
+
+def test_redefined_ops_positional_is_load_bearing():
+    # H4/bench-81k: the SAME symbol's meaning depends on its POSITION in the chain.
+    # A solver that looks the symbol up once (applies phase-1 to every step) must be
+    # WRONG on at least some items — otherwise position is not load-bearing and the
+    # old fixed-lookup / i%2 shortcut would still win.
+    items = _redefined_items("positional")
+    assert items, "no positional redefined_ops items generated"
+    fooled = 0
+    for p in items:
+        assert generators.verify_gold(p) is True
+        dm = re.search(r"(\S) means: for its first \d+ uses, (.*?); for every later use, .*?\.", p.prompt)
+        sym, f1 = dm.group(1), generators._rop_phrase_fn(dm.group(2))
+        cur = int(re.search(r"starts with (\d+)", p.prompt).group(1))
+        for m in re.finditer(rf"\S+ {re.escape(sym)} (\d+) \S+", p.prompt):
+            cur = f1(cur, int(m.group(1)))          # position-blind: always phase-1
+        if str(cur) != p.gold:
+            fooled += 1
+    assert fooled > 0, "position-blind solver was never wrong — position is not load-bearing"
+
+
+def test_redefined_ops_compositional_requires_base_expansion():
+    # H4/bench-81k: one operator is defined IN TERMS OF another (a ⊗ b applies the
+    # base op twice). A solver that applies the base op only ONCE for the composed
+    # symbol must be wrong on some items — proving the composition is load-bearing.
+    items = _redefined_items("compositional")
+    assert items, "no compositional redefined_ops items generated"
+    fooled = 0
+    for p in items:
+        assert generators.verify_gold(p) is True
+        base_def = re.search(r"(\S) means ([^:.]+?)\.", p.prompt)      # the simple base op
+        comp_m = re.search(r"(\S) means: apply (\S) to the two numbers", p.prompt)
+        base_sym, comp_sym = comp_m.group(2), comp_m.group(1)
+        bf = generators._rop_phrase_fn(base_def.group(2))
+        cur = int(re.search(r"starts with (\d+)", p.prompt).group(1))
+        for m in re.finditer(rf"\S+ ({re.escape(base_sym)}|{re.escape(comp_sym)}) (\d+) \S+", p.prompt):
+            cur = bf(cur, int(m.group(2)))          # WRONG: applies base once, never twice
+        if str(cur) != p.gold:
+            fooled += 1
+    assert fooled > 0, "single-apply solver was never wrong — composition is not load-bearing"
+
+
 def test_surface_variants_vary_phrasing_hold_gold():
     # bench-1s0 / E8: surface variants must hold the gold fixed (matched-pair flip
     # metric) AND actually vary cosmetic surface beyond names — verb phrasing now
