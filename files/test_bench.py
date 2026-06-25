@@ -247,6 +247,27 @@ def test_grading_choice_fallback():
     assert correct
 
 
+def test_grading_choice_fallback_restricted_on_csp_sentinels():
+    # Prompt echoes words like knight/knave; without an ANSWER line they must
+    # NOT rescue a non-compliant response via whole-text fallback.
+    choices = ["knight", "knave", "UNDETERMINED", "NO_SOLUTION"]
+    parsed, src = grading.parse_answer(
+        "The prompt mentions a knight and a knave.", "choice", choices)
+    assert parsed is None and src == "none"
+
+    # ANSWER line still wins.
+    parsed, src = grading.parse_answer(
+        "I think the speaker is a knight, not a knave.\nANSWER: knight",
+        "choice", choices)
+    assert parsed == "knight" and src == "marker"
+
+
+def test_grading_choice_fallback_unrestricted_for_other_families():
+    # Non-CSP choice families keep the whole-text fallback.
+    parsed, src = grading.parse_answer(
+        "Diego is clearly the tallest here.", "choice", ["Diego", "Lena"])
+    assert parsed == "Diego" and src == "fallback"
+
 def test_grading_int_strips_thousands_separator():
     # CSP/arithmetic answers can be large; "1,234" must read as 1234, not 1.
     parsed, correct, _, _ = grading.grade("After working it out,\nANSWER: 1,234", "int", "1234")

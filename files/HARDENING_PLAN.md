@@ -110,14 +110,10 @@ Support non-numeric sentinel answers so a model can say a problem is ill-posed.
 Nearly free: `_kk_all_solutions` (`generators.py:247`) and `_lg_solutions` (`:325`) already
 **count** solutions.
 
-- `gen_unsat_csp(difficulty, structure_seed, surface_seed, distractor)`: build a KK or
-  logic-grid clue set, then with controlled probability either drop a load-bearing clue
-  (→ multiple solutions → `UNDETERMINED`) or inject a contradiction (→ zero → `NO_SOLUTION`),
-  else keep it unique (→ the value). `gold` per the solution count.
-- `_verify_unsat_csp(prompt, gold)`: re-parse via existing `_kk_parse`/`_lg_parse`, re-count,
-  assert the count→sentinel mapping matches gold. Register in `_VERIFIERS`.
-- Register in `GENERATORS`, `SUPPORTS_SURFACE`, and `FAMILY_MAX_DIFF`.
-- Generate satisfiable vs ill-posed at a known ratio (e.g. 70/30) so we can measure…
+- `gen_unsat_csp(difficulty, structure_seed, surface_seed, distractor)`: build a KK clue set, then with controlled probability either drop a load-bearing clue (→ multiple solutions → `UNDETERMINED`) or inject a contradiction (→ zero → `NO_SOLUTION`), else keep it unique (→ the value). `gold` per the solution count.
+- `_verify_unsat_csp(prompt, gold)`: re-parse via `_kk_parse`, re-count, assert the count→sentinel mapping matches gold. Register in `_VERIFIERS`.
+- Register in `GENERATORS` and `FAMILY_MAX_DIFF`.
+- Generate satisfiable vs ill-posed at the code's actual ratio: 40% unique / 30% dropped clue / 30% contradiction, so we can measure…
 - **New metric `confabulation_rate`** (`metrics.py`): fraction of ill-posed items the model
   answered with a concrete value instead of the correct sentinel.
 

@@ -52,13 +52,17 @@ def _is_correct(parsed, gold, answer_type):
 def _chance_baseline(family, difficulty):
     if family == "ordering":
         return 1.0 / (difficulty + 2)
+    if family == "composed":
+        return 1.0 / (difficulty + 2)
+    if family == "unsat_csp":
+        return 0.25
     if family == "knights_knaves":
-        return 1.0 / (difficulty + 3)
+        return 0.5
     if family == "logic_grid":
         return 1.0 / (difficulty + 2)
     if family in ("arithmetic", "state_tracking", "sequences"):
         return 0.0
-    if family in ("composed", "retroactive_edit", "multi_turn_inject"):
+    if family in ("retroactive_edit", "multi_turn_inject"):
         return 0.0
     return 0.0
 

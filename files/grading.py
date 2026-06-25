@@ -87,6 +87,21 @@ def parse_answer(text: str, answer_type: str, choices: Optional[List[str]] = Non
 
     if answer_type == "choice":
         cands = choices or []
+        # CSP/sentinel families (knights_knaves, unsat_csp) saturate the prompt
+        # with words like knight/knave/UNDETERMINED/NO_SOLUTION. For these,
+        # only accept the marker line; do not scan the full reasoning text.
+        restricted = any(
+            c.lower() in {"undetermined", "no_solution", "knight", "knave"}
+            for c in cands
+        )
+        if restricted:
+            if marker_src == "marker":
+                # already handled above; any valid marker line was accepted.
+                return None, "none"
+            else:
+                # no marker line -> no fallback rescue.
+                return None, "none"
+
         last, pos = None, -1
         for c in cands:
             for hit in re.finditer(rf"\b{re.escape(c.lower())}\b", text.lower()):

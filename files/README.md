@@ -33,14 +33,13 @@ Thirteen problem families:
 | `multi_turn_inject` | multi-turn state tracking: turn 1 sets state, turn 2 injects a new rule | number of state facts |
 | `knights_knaves` | truth-teller / liar **deduction** under self-reference | islanders (diff+2, up to 8) |
 | `logic_grid` | **constraint satisfaction** — place N people on N floors | floors (diff+2, up to 7) |
-| `unsat_csp` | premise-flaw detection: controlled ill-posed KK / logic-grid puzzles | n (diff+2); brute-force solution count |
+|`unsat_csp` | premise-flaw detection: controlled ill-posed knights-and-knaves puzzles | n (diff+2); brute-force solution count |
 | `composed` | ≥3 execution-dependency hops (e.g. knights → arithmetic → ordering) | chain length / difficulty of each hop |
 | `redefined_ops` | arithmetic with counterfactually redefined operators | number of operations |
 
 The four numeric families (`arithmetic`, `state_tracking`, `ordering`, `sequences`) are **robustness probes**: they measure compositional and perturbation-resilient reasoning, not just final accuracy. The CSP families (`knights_knaves`, `logic_grid`, `unsat_csp`) add **deductive / constraint-satisfaction** load that scales steeply (8 islanders = 2⁸ assignments; 7 floors = 7! arrangements) and is where strong reasoners separate from pattern-matchers. `retroactive_edit`, `multi_turn_inject`, `composed`, and `redefined_ops` test dynamic, multi-hop, and counterfactual execution.
 
-`arithmetic`, `state_tracking`, `ordering`, and `redefined_ops` support distractor + surface probes; `retroactive_edit` supports the distractor probe. CSP families (`knights_knaves`, `logic_grid`, `unsat_csp`) support the surface probe because the structure is chosen in slot space and only labelled afterwards, so renaming holds the answer fixed. `sequences` is difficulty/variance only. `composed`, `multi_turn_inject`, and `unsat_csp` are also structure-invariant where surface renaming is applied to each contained stage.
-
+`arithmetic`, `state_tracking`, `ordering`, `retroactive_edit`, `knights_knaves`, `logic_grid`, and `redefined_ops` support the surface probe; the first three of those also support distractor probes. `composed`, `multi_turn_inject`, `unsat_csp`, and `sequences` do not currently support surface renaming.
 ---
 
 ## Install

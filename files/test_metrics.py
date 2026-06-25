@@ -31,24 +31,21 @@ def test_acc_above_chance_is_at_most_accuracy():
 
 
 def test_chance_baseline_values_for_known_families():
-    for fam, offset, diff in [
-        ("ordering", 2, 3),
-        ("knights_knaves", 3, 4),
-        ("logic_grid", 2, 5),
-    ]:
-        items = [generators._mk(fam, diff, 0, 0, False, "base", "g")]
-        con = storage.connect(":memory:")
-        storage.save_dataset(con, items)
-        for p in items:
-            _store(con, "r", p.item_id, 0, f"ANSWER: {p.gold}", p.gold, 1)
-        res = metrics.compute(con, "r")
-        assert fam in res["chance_baseline"]
-        assert res["chance_baseline"][fam] == pytest.approx(1.0 / (diff + offset))
+    # ordering: choice over (difficulty+2) ranks
+    assert metrics._chance_baseline("ordering", 3) == pytest.approx(1.0 / 5)
+    # knights_knaves: binary knight/knave choice
+    assert metrics._chance_baseline("knights_knaves", 3) == pytest.approx(0.5)
+    # composed: choice over (difficulty+2) names
+    assert metrics._chance_baseline("composed", 3) == pytest.approx(1.0 / 5)
+    # unsat_csp: 4-way determinate choice
+    assert metrics._chance_baseline("unsat_csp", 3) == pytest.approx(0.25)
+    # logic_grid: choice over (difficulty+2) ranks
+    assert metrics._chance_baseline("logic_grid", 5) == pytest.approx(1.0 / 7)
 
 
 def test_zero_chance_families_have_zero_baseline():
     for fam in ["arithmetic", "state_tracking", "sequences",
-                "composed", "retroactive_edit", "multi_turn_inject"]:
+                "retroactive_edit", "multi_turn_inject"]:
         con, items = _dataset([fam], 2, 3, 1)
         for p in items:
             _store(con, "r", p.item_id, 0, f"ANSWER: {p.gold}", p.gold, 1)
