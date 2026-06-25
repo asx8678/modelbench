@@ -54,27 +54,34 @@ and hosted APIs.
 
 ---
 
-## Easiest start: `python cli.py setup`
+## Easiest start: `python cli.py start`
 
-The fastest way to point the benchmark at a model is the interactive wizard. It asks,
-step by step, for the **provider endpoint, API key, model ID, and context window**,
-writes them to `providers.json` (reusing an existing provider if the endpoint matches),
-offers to test the connection, and then prints the exact `generate` / `run` / `report`
-commands to run next.
+One command runs the whole thing interactively — no flags to remember:
 
 ```bash
-python cli.py setup
-# answer 4 prompts -> saves a model alias -> prints your next steps
+python cli.py start          # or just: python cli.py
 ```
 
-- The API key is read with hidden input. By default it's stored as an
-  **environment-variable reference** (`api_key_env`) so no secret lands in the file;
-  choose "file literal" only for throwaway/local keys (`providers.json` is tracked by git).
-- Leave the key blank for keyless local servers (e.g. Ollama).
-- Re-run `setup` any time to add another model; `python cli.py models` lists what's configured.
+It walks you through three steps:
 
-Prefer to edit config by hand? The [registry section](#register-a-provider--model-once-recommended)
-below documents the `providers.json` format the wizard writes.
+1. **Pick or add a model.** If models are already configured it lists them and you pick
+   one by number (or choose to add another). If none are configured it drops straight
+   into the setup wizard, which asks step by step for the **provider endpoint, API key,
+   model ID, and context window**, writes them to `providers.json` (reusing an existing
+   provider when the endpoint matches), and offers to test the connection.
+   - The API key is read with hidden input and, by default, stored as an
+     **environment-variable reference** (`api_key_env`) so no secret lands in the file;
+     choose "file literal" only for throwaway/local keys (`providers.json` is tracked by git).
+   - Leave the key blank for keyless local servers (e.g. Ollama).
+2. **Choose a dataset** — reuse the one already in the DB, or generate a fresh
+   `quick` / `standard` / `thorough` set.
+3. **Run + report** — runs the model with the live progress bar (below) and writes the report.
+
+Just want to register a model without running? `python cli.py setup` is the wizard on
+its own (it prints the `generate` / `run` / `report` commands to run next). Re-run it
+any time to add another model; `python cli.py models` lists what's configured. Prefer
+to edit config by hand? The [registry section](#register-a-provider--model-once-recommended)
+below documents the `providers.json` format both write.
 
 ---
 
@@ -299,7 +306,7 @@ metrics.py      all metrics from the raw responses
 report.py       accessible charts + CSV + Markdown
 providers.py    provider/model registry loader + resolver
 providers.json  the endpoints + model aliases you edit (or let `setup` write)
-cli.py          setup / generate / run / report / list / families / providers / models
+cli.py          start / setup / generate / run / report / list / families / providers / models
 test_bench.py   pytest suite (no model or network needed)
 ```
 

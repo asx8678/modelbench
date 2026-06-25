@@ -24,7 +24,7 @@ problems.
 - [Problem families](#problem-families)
 - [Why these design choices](#why-these-design-choices)
 - [Install](#install)
-- [Easiest start (setup wizard)](#easiest-start-setup-wizard)
+- [Easiest start (one command)](#easiest-start-one-command)
 - [Quickstart](#quickstart-no-model-needed)
 - [Running real models](#running-real-models)
 - [Command reference](#command-reference)
@@ -127,50 +127,42 @@ Studio, llama.cpp, TGI, and hosted APIs. An optional native Anthropic Messages
 streaming path activates when a provider is tagged with the `native_anthropic`
 capability (captures per-phase wall-clock timings).
 
-## Easiest start (setup wizard)
+## Easiest start (one command)
 
-New here? Run the interactive wizard. It asks four questions — **provider endpoint,
-API key, model ID, context window** — saves them to `providers.json`, optionally
-tests the connection, and prints the exact commands to run next:
+New here? Run **one** command and follow the prompts. It asks whether to use a model
+you've already configured or add a new one, builds a problem set, runs the benchmark
+with a live progress bar, and writes the report — start to finish:
 
 ```bash
 cd files
 pip install -r requirements.txt
-python cli.py setup
+python cli.py start          # or just: python cli.py
 ```
 
-```text
-  Short name (alias) for this model: gpt4omini
-  Provider endpoint (OpenAI-compatible base URL): https://api.openai.com/v1
-  Model ID (the provider's own model name, e.g. gpt-4o-mini): gpt-4o-mini
-  API key (input hidden) — leave blank for keyless local servers like Ollama.
-  API key: ********
-  Context window in tokens (e.g. 128000): 128000
+`start` walks you through everything:
 
-  ✓ saved model 'gpt4omini' (provider 'openai') to .../providers.json
-  Test the connection now? [Y/n]: y
-  contacting endpoint... OK ✓
-```
-
-The wizard then prints your three next steps:
-
-```bash
-python cli.py generate --db bench.db --reps 12 --distractor --surface-variants 3
-python cli.py run      --db bench.db --model gpt4omini --run-id gpt4omini --confidence
-python cli.py report   --db bench.db --runs gpt4omini --out report
-```
-
-During `run` you get a **live progress bar** — percent complete, items done,
-OK / error counts, throughput, and ETA — so the benchmark's progress is always
-visible:
+1. **Pick or add a model.** With nothing configured yet it drops straight into the
+   setup wizard, which asks four questions — **provider endpoint, API key, model ID,
+   context window** — and saves them to `providers.json` (the API key defaults to an
+   environment-variable reference, so no secret lands in the file; leave it blank for
+   keyless local servers like Ollama). Already have models? It lists them and you pick
+   one by number, or choose to add another.
+2. **Choose a dataset.** Reuse the one already in your DB, or generate a fresh
+   `quick` / `standard` / `thorough` set — problems are generated on the fly, nothing
+   to download.
+3. **Run + report.** It runs the model with a **live progress bar** — percent
+   complete, items done, OK / error counts, throughput, and ETA — then builds the
+   report:
 
 ```text
   [████████████░░░░░░░░░░░░░░░░]  43.5%  217/499  ok=214 err=3  6.1 it/s  ETA 0:46
 ```
 
-Prefer to skip the wizard? Edit `providers.json` by hand
-([Running real models](#running-real-models)), or try the whole pipeline with no
-model at all via the [Quickstart](#quickstart-no-model-needed) below.
+Want to add a model without running anything? `python cli.py setup` is the wizard on
+its own. Prefer to drive each step yourself? They're all normal commands
+(`generate`, `run`, `report`) — see the [Command reference](#command-reference). Or
+sanity-check the whole pipeline with no model at all via the
+[Quickstart](#quickstart-no-model-needed) below.
 
 ## Quickstart (no model needed)
 
@@ -267,6 +259,7 @@ models on the *identical* items, and compare degradation curves.
 
 | Command | Purpose |
 |---|---|
+| `start` | **One-command launcher** (also the default for bare `cli.py`) — pick or add a model, choose/reuse a dataset, then run + report, all interactively. |
 | `setup` | **Interactive wizard** — register a provider + model (endpoint, API key, model id, context window) into `providers.json` and print the next steps. |
 | `generate` | Build a procedurally-generated problem set into a SQLite DB. |
 | `run` | Run a model (or mock) over the dataset and store graded responses. |
@@ -362,7 +355,7 @@ bench/
 ├── CLAUDE.md / AGENTS.md      project + agent workflow instructions
 ├── .beads/                    beads (bd) issue tracker data, synced via Dolt
 └── files/                     the reasoning-bench tool
-    ├── cli.py                 setup / generate / run / report / list / families / providers / models
+    ├── cli.py                 start / setup / generate / run / report / list / families / providers / models
     ├── generators.py          11 problem families + dataset builder + independent gold verifiers
     ├── grading.py             ANSWER:/CONFIDENCE: extraction + exact-match scoring + fragility
     ├── storage.py             SQLite layer (dataset, runs, responses, telemetry)

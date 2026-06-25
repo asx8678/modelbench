@@ -197,3 +197,70 @@ def test_progress_tty_uses_bar_and_carriage_return():
     p.finish(4, 0)
     out = buf.getvalue()
     assert "\r" in out and "█" in out and "100.0%" in out and "done in" in out
+
+
+# ---- one-command launcher: `cli.py start` / bare `cli.py` (bench-3tt) ----
+
+def _scripted_input(monkeypatch, answers):
+    it = iter(answers)
+    monkeypatch.setattr("builtins.input", lambda *a, **k: next(it))
+
+
+def test_bare_invocation_routes_to_start():
+    assert getattr(cli._parse_args([]), "func", None) is None   # main() falls back to start
+    assert cli._parse_args(["start"]).func is cli.cmd_start
+
+
+def _configure_one_model(tmp_path, monkeypatch, alias="m"):
+    prov = str(tmp_path / "providers.json")
+    reg = {"providers": {}, "models": {}}
+    providers.register_model(reg, alias=alias, base_url="http://x/v1",
+                             model_id="mm", context_window=1000)
+    providers.save(reg, prov)
+    monkeypatch.setenv("BENCH_PROVIDERS", prov)
+
+
+def test_start_runs_existing_model_and_reuses_dataset(monkeypatch, tmp_path):
+    _configure_one_model(tmp_path, monkeypatch)
+    db = str(tmp_path / "b.db")
+    con = storage.connect(db)
+    storage.save_dataset(con, generators.build_dataset(["arithmetic"], 1, 2, 2))
+    con.commit()
+    seen = {}
+    monkeypatch.setattr(cli, "cmd_generate", lambda ns: seen.setdefault("gen", ns))
+    monkeypatch.setattr(cli, "cmd_run", lambda ns: seen.setdefault("run", ns))
+    monkeypatch.setattr(cli, "cmd_report", lambda ns: seen.setdefault("report", ns))
+    # existing, pick #1, reuse dataset (yes), run-id default, confirm yes
+    _scripted_input(monkeypatch, ["e", "1", "y", "", "y"])
+    cli.cmd_start(cli._parse_args(["start", "--db", db]))
+    assert "gen" not in seen                       # reused, did not regenerate
+    assert seen["run"].model == "m" and seen["run"].run_id == "m"
+    assert seen["run"].confidence is True and seen["run"].mock is None
+    assert seen["report"].runs == ["m"]
+
+
+def test_start_generates_quick_preset_when_no_dataset(monkeypatch, tmp_path):
+    _configure_one_model(tmp_path, monkeypatch)
+    db = str(tmp_path / "b.db")                     # empty: no dataset yet
+    seen = {}
+    monkeypatch.setattr(cli, "cmd_generate", lambda ns: seen.setdefault("gen", ns))
+    monkeypatch.setattr(cli, "cmd_run", lambda ns: seen.setdefault("run", ns))
+    monkeypatch.setattr(cli, "cmd_report", lambda ns: seen.setdefault("report", ns))
+    # existing, pick #1, (no dataset ->) preset 1 = quick, run-id default, confirm yes
+    _scripted_input(monkeypatch, ["e", "1", "1", "", "y"])
+    cli.cmd_start(cli._parse_args(["start", "--db", db]))
+    assert seen["gen"].reps == 3 and seen["gen"].max_diff == 4 and seen["gen"].distractor is False
+    assert "run" in seen and "report" in seen
+
+
+def test_start_cancel_at_confirm_skips_run(monkeypatch, tmp_path):
+    _configure_one_model(tmp_path, monkeypatch)
+    db = str(tmp_path / "b.db")
+    con = storage.connect(db)
+    storage.save_dataset(con, generators.build_dataset(["arithmetic"], 1, 2, 2))
+    con.commit()
+    seen = {}
+    monkeypatch.setattr(cli, "cmd_run", lambda ns: seen.setdefault("run", ns))
+    _scripted_input(monkeypatch, ["e", "1", "y", "", "n"])      # confirm -> no
+    cli.cmd_start(cli._parse_args(["start", "--db", db]))
+    assert "run" not in seen

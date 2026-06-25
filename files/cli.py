@@ -2,13 +2,15 @@
 """
 reasoning-bench CLI.
 
-  setup      interactive wizard: register a model + endpoint (start here)
+  start      one command — pick/add a model, then generate + run + report (start here)
+  setup      interactive wizard: register a model + endpoint
   generate   build a procedurally-generated problem set into a SQLite DB
   run        run a model over the dataset and store graded responses
   report     compute metrics + accessible charts for one or more runs
   list       list runs in a DB
   families   list available problem families
 
+Run `python cli.py` with no command to launch the interactive start menu.
 Run `python cli.py <command> -h` for options.
 """
 
@@ -180,7 +182,11 @@ def _ask(label, default=None, required=False, validate=None):
             raw = input(f"  {label}{hint}: ").strip()
         except EOFError:
             print()
-            raw = ""
+            if default is not None:
+                return default
+            if required:
+                raise KeyboardInterrupt          # no more input -> abort, don't loop
+            return ""
         if not raw:
             if default is not None:
                 return default
@@ -268,9 +274,10 @@ def _print_next_steps(alias):
           "or `python cli.py models` to list what's configured.")
 
 
-def cmd_setup(a):
-    path = providers.config_path()
-    reg = providers.load(path)
+def _setup_wizard(reg, path):
+    """Interactive prompts -> register + save -> optional connection test.
+
+    Returns the new model alias, or None if the user cancelled."""
     print("\nreasoning-bench setup — register a model to benchmark.")
     print(f"Answers are saved to {path}. Press Ctrl-C to cancel.\n")
 
@@ -280,7 +287,7 @@ def cmd_setup(a):
         if alias in reg.get("models", {}) and not _ask_yes_no(
                 f"'{alias}' already exists — overwrite it?", default=False):
             print("cancelled.")
-            return
+            return None
 
         base_url = _ask("Provider endpoint (OpenAI-compatible base URL)",
                         required=True, validate=_valid_url)
@@ -303,9 +310,9 @@ def cmd_setup(a):
 
         context_window = _ask_int("Context window in tokens (e.g. 128000)")
         max_tokens = _ask_int("Max completion tokens — optional, blank to skip")
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, EOFError):
         print("\ncancelled.")
-        return
+        return None
 
     reg, prov_name = providers.register_model(
         reg, alias=alias, base_url=base_url, model_id=model_id,
@@ -331,14 +338,124 @@ def cmd_setup(a):
     print()
     if _ask_yes_no("Test the connection now?", default=True):
         _test_connection(base_url, key, model_id)
+    return alias
 
-    _print_next_steps(alias)
+
+def cmd_setup(a):
+    path = providers.config_path()
+    reg = providers.load(path)
+    alias = _setup_wizard(reg, path)
+    if alias:
+        _print_next_steps(alias)
+
+
+# ----------------------------------------------------------------------------
+# start — one interactive command: pick/add a model, then generate -> run -> report
+# ----------------------------------------------------------------------------
+
+# preset key -> (label, generate knobs). Item count grows quick < standard < thorough.
+_DATASET_PRESETS = {
+    "1": ("quick",    dict(reps=3,  min_diff=1, max_diff=4, distractor=False, surface=0)),
+    "2": ("standard", dict(reps=10, min_diff=1, max_diff=6, distractor=True,  surface=0)),
+    "3": ("thorough", dict(reps=20, min_diff=1, max_diff=6, distractor=True,  surface=3)),
+}
+
+
+def _choose_model(reg):
+    """Print the configured models and return the alias the user picks."""
+    models = reg.get("models", {})
+    names = list(models)
+    print("\nConfigured models:")
+    for i, name in enumerate(names, 1):
+        m = models[name]
+        cw = m.get("context_window")
+        print(f"  [{i}] {name}  ->  {m.get('provider', '?')}:{m.get('model', '?')}"
+              f"{'  ctx=' + str(cw) if cw else ''}")
+    while True:
+        raw = _ask(f"Pick a model [1-{len(names)}]", default="1")
+        if raw.isdigit() and 1 <= int(raw) <= len(names):
+            return names[int(raw) - 1]
+        if raw in models:                                 # also accept the alias itself
+            return raw
+        print(f"    (enter a number 1-{len(names)}, or a model alias)")
+
+
+def _ensure_dataset(db):
+    """Reuse the dataset already in `db`, else generate one from a size preset."""
+    existing = storage.load_dataset(storage.connect(db))
+    if existing and _ask_yes_no(
+            f"\nReuse the existing dataset in {db} ({len(existing)} items)?", default=True):
+        return
+    label, knobs = _DATASET_PRESETS.get(
+        _ask("\nDataset size — [1] quick  [2] standard  [3] thorough", default="2"),
+        _DATASET_PRESETS["2"])
+    argv = ["generate", "--db", db,
+            "--reps", str(knobs["reps"]),
+            "--min-diff", str(knobs["min_diff"]), "--max-diff", str(knobs["max_diff"]),
+            "--surface-variants", str(knobs["surface"])]
+    if knobs["distractor"]:
+        argv.append("--distractor")
+    print(f"\nbuilding a '{label}' dataset (this is instant — problems are generated, not downloaded)...")
+    cmd_generate(_parse_args(argv))
+
+
+def cmd_start(a):
+    db = a.db
+    path = providers.config_path()
+    reg = providers.load(path)
+    models = reg.get("models", {})
+
+    print("\n" + "=" * 64)
+    print("  reasoning-bench — interactive launcher")
+    print("=" * 64)
+
+    # 1) pick an existing model, or add a new one with the wizard
+    if not models:
+        print("\nNo models are configured yet — let's add one.")
+        alias = _setup_wizard(reg, path)
+    elif _ask("\nRun an [e]xisting model or [a]dd a new one?",
+              default="e").lower().startswith("a"):
+        alias = _setup_wizard(reg, path)
+    else:
+        alias = _choose_model(reg)
+    if not alias:
+        print("\nnothing to run. Re-run `python cli.py start` any time.")
+        return
+
+    # 2) dataset — reuse or generate
+    _ensure_dataset(db)
+
+    # 3) confirm with sensible defaults, then run with the live progress bar
+    run_id = _ask("\nRun id (a label for this run)", default=alias)
+    n_items = len(storage.load_dataset(storage.connect(db)))
+    print(f"\nReady:  model='{alias}'  dataset={n_items} items  run-id='{run_id}'  "
+          f"samples=1  confidence=on")
+    if not _ask_yes_no(f"Run the benchmark now (~{n_items} model calls)?", default=True):
+        print("cancelled — config and dataset are saved; re-run with `python cli.py start`.")
+        return
+
+    print()
+    cmd_run(_parse_args(["run", "--db", db, "--model", alias,
+                         "--run-id", run_id, "--confidence"]))
+
+    # 4) report — charts need matplotlib; degrade gracefully without it
+    out = "report"
+    try:
+        cmd_report(_parse_args(["report", "--db", db, "--runs", run_id, "--out", out]))
+        print(f"\n✓ all done — report written to {out}/  (report.md + charts + metrics.csv)")
+    except (ImportError, ModuleNotFoundError):
+        print(f"\n✓ run complete (metrics summary above). Charts need matplotlib:\n"
+              f"    pip install matplotlib && python cli.py report --db {db} --runs {run_id}")
 
 
 def _parse_args(argv=None):
     p = argparse.ArgumentParser(prog="reasoning-bench", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    sub = p.add_subparsers(dest="cmd", required=True)
+    sub = p.add_subparsers(dest="cmd", required=False)
+
+    st = sub.add_parser("start", help="one command: pick/add a model, then run the whole benchmark")
+    st.add_argument("--db", default="bench.db")
+    st.set_defaults(func=cmd_start)
 
     se = sub.add_parser("setup", help="interactive wizard: register a model + endpoint")
     se.set_defaults(func=cmd_setup)
@@ -396,7 +513,12 @@ def _parse_args(argv=None):
 
 def main():
     a = _parse_args()
-    a.func(a)
+    if getattr(a, "func", None) is None:        # bare `python cli.py` -> interactive launcher
+        a = _parse_args(["start"])
+    try:
+        a.func(a)
+    except (KeyboardInterrupt, EOFError):
+        print("\ncancelled.")
 
 
 if __name__ == "__main__":
