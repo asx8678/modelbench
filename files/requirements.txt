@@ -1,0 +1,5 @@
+numpy>=1.24          # metrics
+matplotlib>=3.7      # report charts only (imported lazily by `report`)
+# The runner, generators, grading and storage use only the standard library.
+# Dev/test only:
+pytest>=7.0          # pytest -q

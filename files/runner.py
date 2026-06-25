@@ -1,0 +1,313 @@
+"""
+Model runner. Talks to any OpenAI-compatible /chat/completions endpoint, which
+covers hosted APIs and every common local server (Ollama, vLLM, LM Studio,
+llama.cpp, TGI). Set base_url + model + api_key.
+
+An optional native Anthropic Messages API streaming path is triggered when the
+resolved provider carries the `native_anthropic` capability flag. It captures
+per-phase wall-clock timings from stream events and stores them alongside the
+response; the OpenAI-compatible path is otherwise unchanged.
+
+Samples are drawn one request at a time (client-side), not via the server's `n`
+parameter, because many local servers silently ignore `n` and return a single
+completion — which would make pass@k vanish without warning.
+
+A `mock` mode synthesizes answers without a server so you can test the whole
+pipeline (and see that the metrics light up) before pointing at a real model.
+Mock answers are deterministic per (item, sample) so test runs are reproducible.
+"""
+
+import json
+import time
+import random
+import hashlib
+import urllib.request
+import urllib.error
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+import grading
+import storage
+
+try:
+    import anthropic
+except Exception:                               # optional dependency
+    anthropic = None
+
+SYSTEM = "You are a careful reasoning assistant. Work through each problem step by step."
+
+# raw/parsed/correct/confidence/latency/prompt_tokens/completion_tokens
+_ERROR_ROW = (storage.ERROR_MARKER, None, None, None, 0, None, None)
+
+# errors worth retrying: transport problems and malformed/oddly-shaped responses
+_RETRYABLE = (urllib.error.URLError, urllib.error.HTTPError, TimeoutError,
+              OSError, ValueError, json.JSONDecodeError)
+
+
+def _provider_has_capability(cfg, name):
+    caps = cfg.get("capabilities") or []
+    return name in caps
+
+
+
+def build_messages(item, ask_confidence: bool):
+    fmt = ("Show your reasoning, then end with a line in exactly this format:\n"
+           "ANSWER: <your final answer>")
+    if item["answer_type"] == "choice" and item.get("choices"):
+        opts = ", ".join(item["choices"].split("|"))
+        fmt += f"\nYour answer must be exactly one of: {opts}."
+    if ask_confidence:
+        fmt += "\nThen on the next line:\nCONFIDENCE: <an integer 0-100 for how certain you are>"
+
+    system_msg = {"role": "system", "content": SYSTEM}
+    turns = item.get("turns")
+    if turns and isinstance(turns, str):
+        turns = turns.split("|") if turns else []
+    if turns:
+        messages = [system_msg]
+        for idx, turn in enumerate(turns):
+            content = turn if idx == len(turns) - 1 else turn
+            if idx == len(turns) - 1:
+                content = f"{turn}\n\n{fmt}"
+            messages.append({"role": "user", "content": content})
+        return messages
+    user = f"{item['prompt']}\n\n{fmt}"
+    return [system_msg, {"role": "user", "content": user}]
+
+def _to_anthropic_messages(messages):
+    """Convert OpenAI-style message list to Anthropic format.
+
+    Anthropic uses a top-level `system` parameter instead of a system message.
+    """
+    system = ""
+    anthropic_messages = []
+    for m in messages:
+        role = m.get("role")
+        content = m.get("content", "")
+        if role == "system":
+            system = content
+            continue
+        if role == "user":
+            anthropic_messages.append({"role": "user", "content": content})
+        elif role == "assistant":
+            anthropic_messages.append({"role": "assistant", "content": content})
+    return system, anthropic_messages
+
+
+def _parse_anthropic_stream(stream):
+    """
+    Consume an Anthropic SDK message stream and return
+    (text, prompt_tokens, completion_tokens, timings, think_tokens).
+
+    `timings` is a dict of per-phase wall-clock times (seconds since request
+    start): ttft, first_reasoning, answer_wall, total.
+    """
+    t0 = time.time()
+    text_parts = []
+    think_parts = []
+    prompt_tokens = None
+    completion_tokens = None
+    think_tokens = 0
+
+    ttft = None
+    first_reasoning = None
+    answer_started = False
+    answer_wall = None
+
+    for event in stream:
+        now = time.time()
+        if ttft is None:
+            ttft = now - t0
+
+        if event.type == "message_start":
+            usage = event.message.usage
+            prompt_tokens = getattr(usage, "input_tokens", None)
+
+        elif event.type == "content_block_start":
+            block = event.content_block
+            if getattr(block, "type", None) == "thinking":
+                if first_reasoning is None:
+                    first_reasoning = now - t0
+            elif getattr(block, "type", None) == "text":
+                if not answer_started:
+                    answer_started = True
+                    answer_wall = now - t0
+
+        elif event.type == "content_block_delta":
+            delta = event.delta
+            d_type = getattr(delta, "type", None)
+            if d_type == "text_delta":
+                if not answer_started:
+                    answer_started = True
+                    answer_wall = now - t0
+                text_parts.append(delta.text)
+            elif d_type == "thinking_delta":
+                if first_reasoning is None:
+                    first_reasoning = now - t0
+                think_parts.append(delta.thinking)
+
+        elif event.type == "message_delta":
+            usage = event.usage
+            completion_tokens = getattr(usage, "output_tokens", None)
+            details = getattr(usage, "output_tokens_details", None)
+            if details is not None:
+                think_tokens = getattr(details, "thinking_tokens", 0) or 0
+
+    total = time.time() - t0
+    text = "".join(text_parts)
+    timings = {
+        "ttft": ttft,
+        "first_reasoning": first_reasoning,
+        "answer_wall": answer_wall,
+        "total": total,
+    }
+    return text, prompt_tokens, completion_tokens, timings, think_tokens
+
+
+def call_anthropic(api_key, model, messages, temperature, max_tokens, timeout):
+    """One native Anthropic streaming completion.
+
+    Returns (text, prompt_tokens, completion_tokens, timings, think_tokens).
+    Raises ValueError if the response is unusable.
+    """
+    if anthropic is None:
+        raise ValueError("anthropic package is required for the native Anthropic path")
+
+    system, anthropic_messages = _to_anthropic_messages(messages)
+    client = anthropic.Anthropic(api_key=api_key, timeout=timeout)
+    params = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "messages": anthropic_messages,
+        "temperature": temperature,
+        "stream": True,
+        "thinking": {"type": "adaptive", "display": "omitted"},
+    }
+    if system:
+        params["system"] = system
+
+    with client.messages.stream(**params) as stream:
+        text, pt, ct, timings, think_tokens = _parse_anthropic_stream(stream)
+
+    if not text:
+        raise ValueError("Anthropic stream produced no text content")
+    return text, pt, ct, timings, think_tokens
+
+
+def call_api(base_url, api_key, model, messages, temperature, max_tokens, timeout):
+    """One completion. Returns (text, prompt_tokens, completion_tokens).
+    Raises ValueError if the response is not shaped like a chat completion."""
+    url = base_url.rstrip("/") + "/chat/completions"
+    payload = {"model": model, "messages": messages,
+               "temperature": temperature, "max_tokens": max_tokens}
+    data = json.dumps(payload).encode()
+    req = urllib.request.Request(url, data=data, method="POST")
+    req.add_header("Content-Type", "application/json")
+    if api_key:
+        req.add_header("Authorization", f"Bearer {api_key}")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        body = json.loads(resp.read().decode())
+    # Some servers return HTTP 200 with an error/empty body; don't let that crash the run.
+    choices = body.get("choices") if isinstance(body, dict) else None
+    if not choices:
+        raise ValueError(f"response has no choices: {str(body)[:200]}")
+    text = (choices[0].get("message") or {}).get("content")
+    if text is None:
+        raise ValueError("response choice missing message.content")
+    usage = body.get("usage") or {}
+    return text, usage.get("prompt_tokens"), usage.get("completion_tokens")
+
+
+def _mock_seed(item_id, sample_idx):
+    return int(hashlib.sha1(f"{item_id}|{sample_idx}".encode()).hexdigest(), 16) % (2 ** 32)
+
+
+def mock_one(item, sample_idx, mode):
+    """One deterministic synthetic answer. 'noisy' degrades with difficulty/distractor."""
+    rnd = random.Random(_mock_seed(item["item_id"], sample_idx))
+    gold = item["gold"]
+    if mode == "perfect":
+        ok = True
+    elif mode == "random":
+        ok = rnd.random() < 0.5
+    else:  # noisy
+        p = max(0.05, 0.95 - 0.11 * item["difficulty"] - (0.18 if item["has_distractor"] else 0))
+        ok = rnd.random() < p
+    if ok:
+        ans = gold
+    elif item["answer_type"] == "int":
+        ans = str(int(gold) + rnd.choice([-3, -2, -1, 1, 2, 3]))
+    else:
+        opts = item["choices"].split("|")
+        ans = rnd.choice([o for o in opts if o != gold] or [gold])
+    conf = rnd.randint(55, 95) if ok else rnd.randint(30, 80)
+    return f"Reasoning omitted in mock.\nANSWER: {ans}\nCONFIDENCE: {conf}", None, None
+
+
+def _one_completion(item, cfg, sample_idx):
+    """Return (text, ptok, ctok, err). err is None on success."""
+    last_err = None
+    for attempt in range(cfg["retries"] + 1):
+        try:
+            if cfg.get("mock"):
+                text, pt, ct = mock_one(item, sample_idx, cfg["mock"])
+            elif _provider_has_capability(cfg, "native_anthropic"):
+                text, pt, ct, *_ = call_anthropic(
+                    cfg["api_key"], cfg["model"],
+                    build_messages(item, cfg["ask_confidence"]),
+                    cfg["temperature"], cfg["max_tokens"], cfg["timeout"])
+            else:
+                text, pt, ct = call_api(
+                    cfg["base_url"], cfg["api_key"], cfg["model"],
+                    build_messages(item, cfg["ask_confidence"]),
+                    cfg["temperature"], cfg["max_tokens"], cfg["timeout"])
+            return text, pt, ct, None
+        except _RETRYABLE as e:
+            last_err = e
+            if attempt < cfg["retries"]:
+                time.sleep(min(2 ** attempt, 8))
+    return None, None, None, last_err
+
+
+def _process(item, cfg):
+    """Run all samples for one item. Returns (item_id, rows, err_summary)."""
+    rows, last_err = [], None
+    for s in range(cfg["n"]):
+        t0 = time.time()
+        text, ptok, ctok, err = _one_completion(item, cfg, s)
+        latency = int((time.time() - t0) * 1000)
+        if err is not None:
+            last_err = err
+            rows.append((storage.ERROR_MARKER, None, None, None, latency, None, None))
+            continue
+        parsed, correct, conf = grading.grade(
+            text, item["answer_type"], item["gold"],
+            item["choices"].split("|") if item.get("choices") else None)
+        rows.append((text, parsed, correct, conf, latency, ptok, ctok))
+    return item["item_id"], rows, (str(last_err) if last_err else None)
+
+
+def run(con, run_id, items, cfg):
+    storage.new_run(con, run_id, cfg.get("model", "mock"), cfg.get("base_url", ""), cfg)
+    done = storage.done_items(con, run_id) if cfg.get("resume") else set()
+    todo = [it for it in items if it["item_id"] not in done]
+    print(f"running {len(todo)} items (skipping {len(done)} done)  workers={cfg['workers']}  n={cfg['n']}")
+
+    n_done = n_err = 0
+    with ThreadPoolExecutor(max_workers=cfg["workers"]) as ex:
+        futs = {ex.submit(_process, it, cfg): it for it in todo}
+        for fut in as_completed(futs):
+            try:
+                item_id, rows, err = fut.result()
+            except Exception as e:                       # never let one item abort the run
+                item_id, rows, err = futs[fut]["item_id"], [_ERROR_ROW], str(e)
+            for i, (raw, parsed, correct, conf, lat, pt, ct) in enumerate(rows):
+                storage.save_response(con, run_id, item_id, i, raw, parsed, correct, conf, lat, pt, ct)
+            n_done += 1
+            if err:
+                n_err += 1
+                print(f"  ! {item_id}: {err}")
+            if n_done % 25 == 0 or n_done == len(todo):
+                con.commit()
+                print(f"  {n_done}/{len(todo)}")
+    con.commit()
+    print(f"done.  ({n_err} item(s) errored)" if n_err else "done.")
