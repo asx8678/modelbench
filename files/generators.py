@@ -1045,7 +1045,7 @@ SUPPORTS_DISTRACTOR = {"arithmetic", "state_tracking", "ordering", "retroactive_
 # The CSP families pick their structure in slot space and only label it from the
 # surface rng, so renaming is a true cosmetic perturbation with the gold held fixed.
 SUPPORTS_SURFACE = {"arithmetic", "state_tracking", "ordering", "retroactive_edit",
-                    "knights_knaves", "logic_grid", "redefined_ops"}
+                    "knights_knaves", "logic_grid", "redefined_ops", "unsat_csp"}
 
 # For most families difficulty == number of reasoning steps and is open-ended.
 # Some families select a discrete tier / a brute-forced structure instead, where a

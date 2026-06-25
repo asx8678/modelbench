@@ -480,6 +480,9 @@ def test_baseline_metrics_unchanged():
         for top in out.values():
             if isinstance(top, dict):
                 top.pop("knights_knaves", None)
+                # bench-9et.1 adds unsat_csp to SUPPORTS_SURFACE;
+                # the new surface variants change the invariance metrics.
+                top.pop("unsat_csp", None)
         return out
 
     assert json.dumps(per_family(res), sort_keys=True, indent=2) == \
