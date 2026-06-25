@@ -65,10 +65,18 @@ def build_messages(item, ask_confidence: bool):
     if turns:
         messages = [system_msg]
         for idx, turn in enumerate(turns):
-            content = turn if idx == len(turns) - 1 else turn
-            if idx == len(turns) - 1:
-                content = f"{turn}\n\n{fmt}"
+            content = turn
             messages.append({"role": "user", "content": content})
+            # Insert a genuine assistant turn between user turns so the
+            # conversation alternates (system, user, assistant, user, ...)
+            # rather than collapsing two consecutive user messages into
+            # one turn. The assistant echoes the prior user state so the
+            # model has a concrete carry-over to build on.
+            if idx < len(turns) - 1:
+                messages.append({"role": "assistant",
+                                 "content": f"Understood. Current state noted."})
+        # Append the format instructions to the last user turn.
+        messages[-1]["content"] = f"{messages[-1]['content']}\n\n{fmt}"
         return messages
     user = f"{item['prompt']}\n\n{fmt}"
     return [system_msg, {"role": "user", "content": user}]

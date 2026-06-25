@@ -545,10 +545,14 @@ def test_multi_turn_build_messages_emits_user_per_turn():
     item = p.row()
     msgs = runner.build_messages(item, ask_confidence=False)
     assert msgs[0]["role"] == "system"
-    # Each turn becomes a user message; the last includes the format instruction.
+    # Alternating transcript: system, user, assistant, user, assistant, ...
+    # so consecutive same-role messages are never emitted (axk.1).
     turns = p.turns
-    assert len(msgs) == len(turns) + 1
-    assert all(m["role"] == "user" for m in msgs[1:])
+    expected_len = 1 + 2 * len(turns) - 1
+    assert len(msgs) == expected_len
+    roles = [m["role"] for m in msgs]
+    assert roles == ["system"] + [r for _ in turns
+                                  for r in ("user", "assistant")][:2 * len(turns) - 1]
     assert turns[0] in msgs[1]["content"]
     assert "ANSWER:" in msgs[-1]["content"]
 
