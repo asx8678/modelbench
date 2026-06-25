@@ -249,13 +249,40 @@ on the *identical* items, and compare degradation curves. Because the items are 
 
 ---
 
+## Terminal dashboard (`dashboard`)
+
+For an at-a-glance view without opening the PNGs, render the metrics profile straight
+into the terminal:
+
+```bash
+python cli.py dashboard --db bench.db --runs llama32              # one run, full dashboard
+python cli.py dashboard --db bench.db --runs llama32 gemma31      # compare runs (leaderboard)
+```
+
+A single run shows colored value meters (accuracy, coverage, ECE, answer-flip,
+confabulation, pass@1→maj@k→oracle), an **inline degradation sparkline per family**, the
+calibration diagram, distractibility, and a runtime block (latency percentiles + token
+totals from the responses table). Multiple runs render a per-metric leaderboard whose
+meters are scaled so the **best run in each row always has the longest bar** — even on
+"lower is better" rows like ECE.
+
+It is **dependency-free** (standard library only, like the runner — no matplotlib) and
+mirrors `runner`'s progress bar for capability handling: color + box-drawing on a real
+TTY, clean ASCII when redirected to a file, and it honors `NO_COLOR` / `TERM=dumb`.
+`--no-color` and `--width N` override the auto-detection. `start` prints it automatically
+as the closing summary. Every bar carries its number and a ✓ / ~ / ✗ status mark, so
+nothing depends on color alone.
+
+---
+
 ## Accessibility
 
 Charts use the Okabe-Ito colorblind-safe palette with **redundant encoding** — every
 model has a distinct color *and* marker shape *and* line style, so the plots stay
 readable in greyscale and under color-vision deficiency. Fonts are DejaVu Sans at a
 large size. `metrics.csv` is provided for screen-reader / spreadsheet use instead of
-relying on the images.
+relying on the images. The terminal `dashboard` follows the same redundant-encoding
+rule (number + glyph + color on every bar).
 
 ---
 
@@ -305,11 +332,12 @@ generators.py   problem families + dataset builder + independent gold verifiers
 grading.py      answer extraction + scoring
 storage.py      SQLite layer
 runner.py       OpenAI-compatible client + orchestration (+ deterministic mock)
-metrics.py      all metrics from the raw responses
+metrics.py      all metrics from the raw responses (+ runtime/token stats)
 report.py       accessible charts + CSV + Markdown
+dashboard.py    dependency-free terminal dashboard + multi-run comparison
 providers.py    provider/model registry loader + resolver
 providers.json  the endpoints + model aliases you edit (or let `setup` write)
-cli.py          start / setup / generate / run / report / list / families / providers / models
+cli.py          start / setup / generate / run / report / dashboard / list / families / providers / models
 test_bench.py   pytest suite (no model or network needed)
 ```
 

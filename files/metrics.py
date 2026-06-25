@@ -470,6 +470,41 @@ def compute(con, run_id):
     }
 
 
+def runtime_stats(con, run_id):
+    """Operational stats for a run, straight from the responses table: per-call
+    latency distribution, token totals, and the error count.
+
+    These are deliberately NOT in `compute` (which is about reasoning signals);
+    they answer "how long / how many tokens did this run cost", which the dashboard
+    surfaces. Latency covers every call including errors; token sums only count
+    calls where the provider actually reported usage (mocks and some servers don't).
+    """
+    rows = con.execute(
+        "SELECT raw, latency_ms, prompt_tokens, completion_tokens "
+        "FROM responses WHERE run_id=?", (run_id,)).fetchall()
+    if not rows:
+        return None
+    lat = [r["latency_ms"] for r in rows if r["latency_ms"] is not None]
+    ptok = [r["prompt_tokens"] for r in rows if r["prompt_tokens"] is not None]
+    ctok = [r["completion_tokens"] for r in rows if r["completion_tokens"] is not None]
+    errored = sum(1 for r in rows if r["raw"] == "__ERROR__")
+
+    def _pct(xs, q):
+        return int(round(float(np.percentile(xs, q)))) if xs else 0
+
+    return {
+        "n_calls": len(rows),
+        "errored": errored,
+        "latency_p50_ms": _pct(lat, 50),
+        "latency_p95_ms": _pct(lat, 95),
+        "latency_mean_ms": int(round(float(np.mean(lat)))) if lat else 0,
+        "tokens_available": bool(ctok),
+        "prompt_tokens_total": int(sum(ptok)),
+        "completion_tokens_total": int(sum(ctok)),
+        "completion_tokens_mean": int(round(float(np.mean(ctok)))) if ctok else 0,
+    }
+
+
 def print_summary(res):
     if "error" in res:
         print(res["error"]); return

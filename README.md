@@ -268,6 +268,7 @@ models on the *identical* items, and compare degradation curves.
 | `generate` | Build a procedurally-generated problem set into a SQLite DB. |
 | `run` | Run a model (or mock) over the dataset and store graded responses. |
 | `report` | Compute metrics + accessible charts for one or more runs. |
+| `dashboard` | Render a rich **in-terminal** stats dashboard for a run (or compare several side by side) — no image viewer needed. |
 | `list` | List runs in a DB. |
 | `families` | List families and their distractor/surface support. |
 | `providers` | List configured providers from `providers.json`. |
@@ -318,12 +319,50 @@ never double-counts — `--resume` only *skips* finished work.
 - **Confabulation rate** on `unsat_csp` is the meaningful metric there: concrete
   answers to `UNDETERMINED` / `NO_SOLUTION` items.
 
+### Terminal dashboard
+
+Don't want to open PNGs? `dashboard` renders the whole profile **in the terminal** —
+colored value meters, an inline degradation sparkline per family (so a cliff jumps
+out at a glance), the calibration diagram, distractibility, and runtime/token cost:
+
+```bash
+python cli.py dashboard --db bench.db --runs gpt4omini          # one run, full dashboard
+python cli.py dashboard --db bench.db --runs llama32 gemma31    # many runs, leaderboard
+```
+
+```text
+╭──────────────────────────────────────────────────────────────────────────╮
+│ reasoning-bench · gpt4omini                                    gpt-4o-mini │
+│ 1,512 items · 3 samples/item · 2026-06-25 14:53                            │
+╰──────────────────────────────────────────────────────────────────────────╯
+
+ HEADLINE ──────────────────────────────────────────────────────────────────
+   accuracy          ███████████▌░░░░░░ 0.637  ~  single-shot, base items
+   coverage          ██████████████████ 1.000  ✓  1512/1512 answered
+   calibration ECE   ██▎░░░░░░░░░░░░░░░ 0.125  ✓  lower is better
+   answer-flip rate  █████████████▌░░░░ 0.753  ✗  lower is better
+   self-consistency  pass@1 0.637 → maj@3 0.704 → oracle 0.931  (+0.294 headroom)
+
+ ACCURACY BY FAMILY ────────────────────────────────────────────────────────
+   arithmetic        ████████████▏░░░░░ 0.68 ✓  █▇▇▇▃  reasoning steps
+   knights_knaves    ████████████▋░░░░░ 0.70 ✓  ██▇▅▅  islanders (n) · 0.67 above chance
+   state_tracking    ██████████████▍░░░ 0.80 ✓  ███▆▇  reasoning steps
+   …
+```
+
+It's **dependency-free** (standard library only — no matplotlib) and capability-aware:
+color and box-drawing on a real terminal, clean plain ASCII when piped to a file, and
+it honors `NO_COLOR`. `start` shows it automatically as the final summary. Use
+`--no-color` / `--width` to override detection. Every bar still carries its number and
+a ✓ / ~ / ✗ mark, so meaning never rests on color alone.
+
 ### Accessibility
 
 Charts use the Okabe-Ito colorblind-safe palette with **redundant encoding** — every
 model gets a distinct color *and* marker shape *and* line style, so plots stay
 readable in greyscale and under color-vision deficiency. `metrics.csv` is provided
-for screen-reader / spreadsheet use instead of relying on the images.
+for screen-reader / spreadsheet use instead of relying on the images. The terminal
+`dashboard` follows the same rule (number + glyph + color on every bar).
 
 ---
 
@@ -349,7 +388,9 @@ re-verified per item       + optional native Anthropic)        → md / png / cs
    `report.build_report` writes Markdown, accessible PNG charts, and `metrics.csv`.
 
 Because step 3 reads only stored rows, you can iterate on metrics and charts without
-re-spending tokens.
+re-spending tokens. The terminal `dashboard` is a fourth consumer of the same
+responses table — it renders the metrics profile in-place (no matplotlib), so you can
+eyeball a run the moment it finishes.
 
 ## Repository layout
 
@@ -364,8 +405,9 @@ bench/
     ├── grading.py             ANSWER:/CONFIDENCE: extraction + exact-match scoring + fragility
     ├── storage.py             SQLite layer (dataset, runs, responses, telemetry)
     ├── runner.py              OpenAI-compatible client + orchestration (+ deterministic mock)
-    ├── metrics.py             all metrics computed from raw responses
+    ├── metrics.py             all metrics computed from raw responses (+ runtime/token stats)
     ├── report.py              accessible charts + CSV + Markdown
+    ├── dashboard.py           dependency-free terminal dashboard + run comparison
     ├── providers.py           provider/model registry loader + resolver
     ├── providers.json         the endpoints + model aliases you edit
     ├── requirements.txt       numpy + matplotlib (+ pytest for dev)

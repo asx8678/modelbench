@@ -7,6 +7,7 @@ reasoning-bench CLI.
   generate   build a procedurally-generated problem set into a SQLite DB
   run        run a model over the dataset and store graded responses
   report     compute metrics + accessible charts for one or more runs
+  dashboard  rich in-terminal stats dashboard / multi-run comparison
   list       list runs in a DB
   families   list available problem families
 
@@ -18,6 +19,7 @@ import re
 import json
 import os
 import sys
+import time
 import getpass
 import argparse
 
@@ -126,6 +128,46 @@ def cmd_report(a):
         metrics.print_summary(metrics.compute(con, rid))
     report.build_report(con, rids, a.out)
 
+
+
+def _run_meta(con, run_id):
+    """Model name + human-readable creation time for a run (for the dashboard banner)."""
+    row = con.execute("SELECT model, created_at FROM runs WHERE run_id=?", (run_id,)).fetchone()
+    if not row:
+        return {}
+    created = ""
+    if row["created_at"]:
+        created = time.strftime("%Y-%m-%d %H:%M", time.localtime(row["created_at"]))
+    return {"model": row["model"], "created": created}
+
+
+def cmd_dashboard(a):
+    import dashboard          # stdlib-only; no matplotlib, unlike report
+    con = storage.connect(a.db)
+    rids = a.runs or [r["run_id"] for r in storage.list_runs(con)]
+    if not rids:
+        sys.exit("no runs found — run `run` first, or pass --runs")
+    caps = dashboard.detect_caps(
+        force_color=(False if a.no_color else None), width=a.width)
+    results, metas, missing = [], [], []
+    for rid in rids:
+        res = metrics.compute(con, rid)
+        if "error" in res:
+            missing.append(rid); continue
+        results.append(res)
+        metas.append(_run_meta(con, rid))
+    for rid in missing:
+        print(f"skip {rid}: no responses for run")
+    if not results:
+        sys.exit("nothing to show")
+
+    if len(results) == 1:
+        rstats = metrics.runtime_stats(con, results[0]["run_id"])
+        dashboard.show(dashboard.render_run(results[0], metas[0], rstats, caps))
+    else:
+        _warn_if_dataset_tags_mismatch(con, [r["run_id"] for r in results])
+        labels = [r["run_id"] for r in results]
+        dashboard.show(dashboard.render_compare(results, labels, metas, caps))
 
 
 def cmd_list(a):
@@ -440,12 +482,24 @@ def cmd_start(a):
 
     # 4) report — charts need matplotlib; degrade gracefully without it
     out = "report"
+    charts = True
     try:
         cmd_report(_parse_args(["report", "--db", db, "--runs", run_id, "--out", out]))
-        print(f"\n✓ all done — report written to {out}/  (report.md + charts + metrics.csv)")
     except (ImportError, ModuleNotFoundError):
-        print(f"\n✓ run complete (metrics summary above). Charts need matplotlib:\n"
-              f"    pip install matplotlib && python cli.py report --db {db} --runs {run_id}")
+        charts = False
+        print(f"\n(PNG charts need matplotlib: pip install matplotlib "
+              f"&& python cli.py report --db {db} --runs {run_id})")
+
+    # 5) terminal dashboard — the at-a-glance visual finale (stdlib only, no
+    # matplotlib). Best-effort: a run with nothing scorable must not abort start.
+    try:
+        cmd_dashboard(_parse_args(["dashboard", "--db", db, "--runs", run_id]))
+    except SystemExit:
+        pass
+
+    tail = f"report written to {out}/ (report.md + charts + metrics.csv)" if charts \
+        else "metrics shown above"
+    print(f"\n✓ all done — {tail}")
 
 
 def _parse_args(argv=None):
@@ -499,6 +553,14 @@ def _parse_args(argv=None):
     rep.add_argument("--runs", nargs="*", default=None, help="run_ids (default: all)")
     rep.add_argument("--out", default="report", help="output directory")
     rep.set_defaults(func=cmd_report)
+
+    da = sub.add_parser("dashboard", help="rich terminal dashboard / run comparison")
+    da.add_argument("--db", default="bench.db")
+    da.add_argument("--runs", nargs="*", default=None,
+                    help="run_ids: one renders a full dashboard, many compare (default: all)")
+    da.add_argument("--no-color", action="store_true", help="disable ANSI color")
+    da.add_argument("--width", type=int, default=None, help="override terminal width")
+    da.set_defaults(func=cmd_dashboard)
 
     li = sub.add_parser("list", help="list runs"); li.add_argument("--db", default="bench.db")
     li.set_defaults(func=cmd_list)
