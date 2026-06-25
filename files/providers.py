@@ -21,6 +21,7 @@ Ollama endpoint (the previous default).
 
 import json
 import os
+import urllib.parse
 
 _DEFAULT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "providers.json")
 
@@ -101,3 +102,73 @@ def resolve(reg, model_arg, provider_arg=None, base_url_arg=None,
             "api_key": _resolve_key(prov, api_key_arg),
             "context_window": context_window, "max_tokens": max_tokens,
             "provider": prov_name, "capabilities": capabilities}
+
+
+def provider_name_from_url(base_url: str) -> str:
+    """Derive a short, readable provider alias from an endpoint URL.
+
+    https://api.openai.com/v1 -> 'openai', https://openrouter.ai/api/v1 ->
+    'openrouter', http://localhost:11434/v1 -> 'local'. Cosmetic only — the
+    user mostly refers to the model alias, not the provider.
+    """
+    host = urllib.parse.urlparse(base_url).hostname or ""
+    if not host or host == "localhost" or all(c.isdigit() or c == "." for c in host):
+        return "local"
+    labels = [l for l in host.split(".") if l not in ("api", "www")]
+    if len(labels) > 1 and len(labels[-1]) <= 3:          # drop a trailing .com/.ai/.io
+        labels = labels[:-1]
+    name = (labels[-1] if labels else host).replace("-", "_")
+    return name or "provider"
+
+
+def register_model(reg, *, alias, base_url, model_id, api_key=None,
+                   api_key_env=None, context_window=None, max_tokens=None):
+    """Add (or update) a provider + model in the registry dict.
+
+    Reuses an existing provider that already points at the same base_url so
+    repeatedly adding models from one endpoint doesn't pile up duplicate
+    providers; otherwise creates a provider named after the endpoint host.
+    Returns (reg, provider_name). Pure aside from mutating `reg`.
+    """
+    reg.setdefault("providers", {})
+    reg.setdefault("models", {})
+
+    prov_name = next((n for n, p in reg["providers"].items()
+                      if p.get("base_url") == base_url), None)
+    if prov_name is None:
+        prov_name = _unique_provider_name(provider_name_from_url(base_url), reg["providers"])
+
+    prov = reg["providers"].setdefault(prov_name, {})
+    prov["base_url"] = base_url
+    if api_key_env:                                       # env reference wins; drop any literal
+        prov["api_key_env"] = api_key_env
+        prov.pop("api_key", None)
+    elif api_key:
+        prov["api_key"] = api_key
+        prov.pop("api_key_env", None)
+
+    model = {"provider": prov_name, "model": model_id}
+    if context_window:
+        model["context_window"] = int(context_window)
+    if max_tokens:
+        model["max_tokens"] = int(max_tokens)
+    reg["models"][alias] = model
+    return reg, prov_name
+
+
+def _unique_provider_name(base, existing) -> str:
+    if base not in existing:
+        return base
+    i = 2
+    while f"{base}{i}" in existing:
+        i += 1
+    return f"{base}{i}"
+
+
+def save(reg, path=None) -> str:
+    """Write the registry to disk as pretty JSON. Returns the path written."""
+    path = path or config_path()
+    with open(path, "w") as f:
+        json.dump(reg, f, indent=2)
+        f.write("\n")
+    return path

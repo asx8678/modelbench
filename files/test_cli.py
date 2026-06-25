@@ -11,6 +11,7 @@ import storage
 import generators
 import runner
 import metrics
+import providers
 
 
 def _parse_run_args(argv):
@@ -80,3 +81,119 @@ def test_report_silent_when_dataset_tags_match(capsys):
     cli._warn_if_dataset_tags_mismatch(con, ["run-a", "run-b"])
     captured = capsys.readouterr()
     assert "different dataset tags" not in captured.out
+
+
+# ---- setup wizard / registry (bench-9gn) + mock-run regression (bench-7cs) ----
+
+def test_provider_name_from_url():
+    assert providers.provider_name_from_url("https://api.openai.com/v1") == "openai"
+    assert providers.provider_name_from_url("https://openrouter.ai/api/v1") == "openrouter"
+    assert providers.provider_name_from_url("http://localhost:11434/v1") == "local"
+    assert providers.provider_name_from_url("http://127.0.0.1:8000/v1") == "local"
+
+
+def test_register_model_new_provider_and_model():
+    reg = {"providers": {}, "models": {}}
+    reg, prov = providers.register_model(
+        reg, alias="m1", base_url="https://api.openai.com/v1",
+        model_id="gpt-4o-mini", api_key_env="OPENAI_API_KEY",
+        context_window=128000, max_tokens=4096)
+    assert prov == "openai"
+    assert reg["providers"]["openai"]["base_url"] == "https://api.openai.com/v1"
+    assert reg["providers"]["openai"]["api_key_env"] == "OPENAI_API_KEY"
+    assert reg["models"]["m1"] == {
+        "provider": "openai", "model": "gpt-4o-mini",
+        "context_window": 128000, "max_tokens": 4096}
+
+
+def test_register_model_reuses_provider_with_same_url():
+    reg = {"providers": {}, "models": {}}
+    reg, p1 = providers.register_model(reg, alias="a", base_url="https://x.ai/v1", model_id="m-a")
+    reg, p2 = providers.register_model(reg, alias="b", base_url="https://x.ai/v1", model_id="m-b")
+    assert p1 == p2
+    assert len(reg["providers"]) == 1
+    assert set(reg["models"]) == {"a", "b"}
+
+
+def test_register_model_literal_and_env_keys_are_mutually_exclusive():
+    reg = {"providers": {}, "models": {}}
+    reg, _ = providers.register_model(reg, alias="a", base_url="https://x.ai/v1",
+                                      model_id="m", api_key="sk-literal")
+    prov = reg["providers"][reg["models"]["a"]["provider"]]
+    assert prov["api_key"] == "sk-literal" and "api_key_env" not in prov
+    # re-registering the same endpoint with an env reference drops the literal
+    providers.register_model(reg, alias="b", base_url="https://x.ai/v1",
+                             model_id="m2", api_key_env="X_KEY")
+    assert prov["api_key_env"] == "X_KEY" and "api_key" not in prov
+
+
+def test_register_model_distinct_urls_get_unique_provider_names():
+    reg = {"providers": {"openai": {"base_url": "https://api.openai.com/v1"}}, "models": {}}
+    reg, prov = providers.register_model(reg, alias="a",
+                                         base_url="https://api.openai.com/v2", model_id="m")
+    assert prov != "openai"
+    assert reg["providers"][prov]["base_url"] == "https://api.openai.com/v2"
+
+
+def test_register_model_overwrites_model_alias():
+    reg = {"providers": {}, "models": {}}
+    providers.register_model(reg, alias="a", base_url="https://x.ai/v1", model_id="old")
+    providers.register_model(reg, alias="a", base_url="https://x.ai/v1", model_id="new")
+    assert reg["models"]["a"]["model"] == "new"
+
+
+def test_save_and_load_roundtrip(tmp_path):
+    path = str(tmp_path / "providers.json")
+    reg = {"providers": {}, "models": {}}
+    providers.register_model(reg, alias="a", base_url="https://x.ai/v1", model_id="m",
+                             context_window=1000)
+    providers.save(reg, path)
+    loaded = providers.load(path)
+    assert loaded["models"]["a"]["model"] == "m"
+    assert loaded["models"]["a"]["context_window"] == 1000
+
+
+def test_cmd_run_mock_does_not_crash(tmp_path, capsys):
+    """Regression for bench-7cs: cmd_run referenced an undefined `ep` in --mock mode."""
+    db = str(tmp_path / "bench.db")
+    con = storage.connect(db)
+    storage.save_dataset(con, generators.build_dataset(["arithmetic"], 1, 2, 2))
+    con.commit()
+    args = cli._parse_args(["run", "--db", db, "--mock", "perfect", "--run-id", "t"])
+    args.func(args)                       # must not raise UnboundLocalError
+    out = capsys.readouterr().out
+    assert "running" in out and "done in" in out
+    n = storage.connect(db).execute(
+        "SELECT COUNT(*) c FROM responses WHERE run_id='t'").fetchone()["c"]
+    assert n > 0
+
+
+def test_fmt_dur():
+    assert runner._fmt_dur(0) == "0:00"
+    assert runner._fmt_dur(65) == "1:05"
+    assert runner._fmt_dur(3661) == "1:01:01"
+
+
+def test_progress_redirected_emits_counts_and_summary():
+    buf = io.StringIO()                   # StringIO.isatty() -> False -> plain-line mode
+    p = runner._Progress(10, stream=buf)
+    p.update(0, 0, 0)
+    for i in range(1, 11):
+        p.update(i, i, 0)
+    p.finish(10, 0)
+    out = buf.getvalue()
+    assert "10/10" in out and "it/s" in out
+    assert "done in" in out and "\r" not in out
+
+
+def test_progress_tty_uses_bar_and_carriage_return():
+    class _TTY(io.StringIO):
+        def isatty(self):
+            return True
+    buf = _TTY()
+    p = runner._Progress(4, stream=buf)
+    p.update(0, 0, 0)
+    p.update(4, 4, 0)                     # final update always paints despite throttle
+    p.finish(4, 0)
+    out = buf.getvalue()
+    assert "\r" in out and "█" in out and "100.0%" in out and "done in" in out

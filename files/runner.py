@@ -17,6 +17,7 @@ pipeline (and see that the metrics light up) before pointing at a real model.
 Mock answers are deterministic per (item, sample) so test runs are reproducible.
 """
 
+import sys
 import json
 import time
 import random
@@ -366,13 +367,82 @@ def _process(item, cfg):
 
 
 
+def _fmt_dur(seconds):
+    """Compact H:MM:SS / M:SS duration for the progress line."""
+    s = int(round(max(seconds, 0)))
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    return f"{h}:{m:02d}:{sec:02d}" if h else f"{m}:{sec:02d}"
+
+
+class _Progress:
+    """Dependency-free live progress for a run.
+
+    On a TTY it repaints one line in place (carriage return) with a bar,
+    percentage, item counts, throughput and ETA. When output is redirected
+    (no TTY) it instead emits a plain line every ~5% so logs stay readable.
+    """
+
+    def __init__(self, total, stream=None, width=28):
+        self.total = max(total, 1)
+        self.width = width
+        self.stream = stream if stream is not None else sys.stdout
+        self.tty = bool(getattr(self.stream, "isatty", lambda: False)())
+        self.start = time.time()
+        self._last_paint = 0.0
+        self._step = max(1, self.total // 20)            # ~5% cadence when redirected
+
+    def update(self, done, ok, err):
+        now = time.time()
+        final = done >= self.total
+        if self.tty:
+            if not final and now - self._last_paint < 0.1:   # throttle repaints
+                return
+        elif not final and done % self._step:                # ~5% cadence in logs
+            return
+        self._last_paint = now
+
+        elapsed = now - self.start
+        rate = done / elapsed if elapsed > 0 else 0.0
+        eta = (self.total - done) / rate if rate > 0 and not final else 0.0
+        frac = done / self.total
+        stats = (f"{done}/{self.total}  ok={ok} err={err}  "
+                 f"{rate:4.1f} it/s  ETA {_fmt_dur(eta)}")
+        if self.tty:
+            filled = int(self.width * frac)
+            bar = "█" * filled + "░" * (self.width - filled)
+            self.stream.write(f"\r  [{bar}] {frac * 100:5.1f}%  {stats}  ")
+        else:
+            self.stream.write(f"  {frac * 100:5.1f}%  {stats}\n")
+        self.stream.flush()
+
+    def finish(self, ok, err):
+        elapsed = time.time() - self.start
+        rate = self.total / elapsed if elapsed > 0 else 0.0
+        if self.tty:
+            self.stream.write("\n")
+        tail = f", {err} errored" if err else ""
+        self.stream.write(
+            f"done in {_fmt_dur(elapsed)}  ({self.total} items, {ok} ok{tail}, "
+            f"{rate:.1f} it/s)\n")
+        self.stream.flush()
+
+
 def run(con, run_id, items, cfg):
     storage.new_run(con, run_id, cfg.get("model", "mock"), cfg.get("base_url", ""), cfg)
     done = storage.done_items(con, run_id) if cfg.get("resume") else set()
     todo = [it for it in items if it["item_id"] not in done]
-    print(f"running {len(todo)} items (skipping {len(done)} done)  workers={cfg['workers']}  n={cfg['n']}")
+    total = len(todo)
+    print(f"running {total} items (skipping {len(done)} done)  "
+          f"model={cfg.get('model', 'mock')}  workers={cfg['workers']}  n={cfg['n']}")
+    if total == 0:
+        print("nothing to do — every item already has a stored response (use --resume off "
+              "to re-run, or change --run-id).")
+        return
 
-    n_done = n_err = 0
+    n_done = n_ok = n_err = 0
+    prog = _Progress(total)
+    prog.update(0, 0, 0)
     with ThreadPoolExecutor(max_workers=cfg["workers"]) as ex:
         futs = {ex.submit(_process, it, cfg): it for it in todo}
         for fut in as_completed(futs):
@@ -386,8 +456,10 @@ def run(con, run_id, items, cfg):
                 storage.save_response(con, run_id, item_id, i, raw, parsed, correct, conf, lat, pt, ct,
                                     metadata={"parse_source": parse_source})
             n_done += 1
-            if n_done % 25 == 0 or n_done == len(todo):
+            n_err += err is not None
+            n_ok += err is None
+            if n_done % 25 == 0 or n_done == total:
                 con.commit()
-                print(f"  {n_done}/{len(todo)}")
+            prog.update(n_done, n_ok, n_err)
     con.commit()
-    print(f"done.  ({n_err} item(s) errored)" if n_err else "done.")
+    prog.finish(n_ok, n_err)

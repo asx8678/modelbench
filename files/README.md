@@ -54,6 +54,30 @@ and hosted APIs.
 
 ---
 
+## Easiest start: `python cli.py setup`
+
+The fastest way to point the benchmark at a model is the interactive wizard. It asks,
+step by step, for the **provider endpoint, API key, model ID, and context window**,
+writes them to `providers.json` (reusing an existing provider if the endpoint matches),
+offers to test the connection, and then prints the exact `generate` / `run` / `report`
+commands to run next.
+
+```bash
+python cli.py setup
+# answer 4 prompts -> saves a model alias -> prints your next steps
+```
+
+- The API key is read with hidden input. By default it's stored as an
+  **environment-variable reference** (`api_key_env`) so no secret lands in the file;
+  choose "file literal" only for throwaway/local keys (`providers.json` is tracked by git).
+- Leave the key blank for keyless local servers (e.g. Ollama).
+- Re-run `setup` any time to add another model; `python cli.py models` lists what's configured.
+
+Prefer to edit config by hand? The [registry section](#register-a-provider--model-once-recommended)
+below documents the `providers.json` format the wizard writes.
+
+---
+
 ## Quickstart (3 steps)
 
 ```bash
@@ -174,6 +198,17 @@ eleven families is ~5,000 items. At `--samples 1` that's ~5,000 model calls.
 --mock {perfect,random,noisy}   synthesize answers without a server (deterministic).
 ```
 
+While a run is in progress the runner shows a **live progress bar** — percent complete,
+items done, OK / error counts, throughput, and ETA — repainted in place on a terminal:
+
+```text
+  [████████████░░░░░░░░░░░░░░░░]  43.5%  217/499  ok=214 err=3  6.1 it/s  ETA 0:46
+```
+
+When stdout is redirected to a file it falls back to a plain progress line every ~5%
+so logs stay readable, and a final `done in M:SS (… items, … ok, … errored)` summary
+closes every run.
+
 Re-running the same `--run-id` overwrites its rows (keyed on item+sample), so it never
 double-counts — `--resume` is only needed to *skip* finished work, not to avoid duplicates.
 
@@ -263,8 +298,8 @@ runner.py       OpenAI-compatible client + orchestration (+ deterministic mock)
 metrics.py      all metrics from the raw responses
 report.py       accessible charts + CSV + Markdown
 providers.py    provider/model registry loader + resolver
-providers.json  the endpoints + model aliases you edit
-cli.py          generate / run / report / list / families / providers / models
+providers.json  the endpoints + model aliases you edit (or let `setup` write)
+cli.py          setup / generate / run / report / list / families / providers / models
 test_bench.py   pytest suite (no model or network needed)
 ```
 
