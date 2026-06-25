@@ -136,6 +136,48 @@ def confabulation_vs_confidence_chart(run_results, labels, outpath):
     return outpath
 
 
+def behavioral_uncertainty_chart(run_results, labels, outpath):
+    """Grouped bars: disagreement entropy and self-consistency gap per model.
+
+    These are the validated behavioral-uncertainty signals (mf4.3): the
+    gap between maj@k and pass@1 (selfconsistency_gap) and the Shannon
+    entropy of the k-sample answer distribution. Both are derived from
+    the stored responses, no model calls.
+    """
+    if not labels:
+        return None
+    n = len(labels)
+    width = 0.38
+    fig, ax = plt.subplots(figsize=(max(7, 1.6 * n * 2.0), 4.6))
+    xs = list(range(n))
+    for i, (res, lab) in enumerate(zip(run_results, labels)):
+        bu = res.get("behavioral_uncertainty") or {}
+        ent = bu.get("disagreement_entropy") or 0.0
+        sc = bu.get("selfconsistency_gap")
+        sc = sc if sc is not None else 0.0
+        off = (i - (n - 1) / 2) * width
+        c = OKABE[i % len(OKABE)]
+        ax.bar([x + off - width / 2 for x in xs], [ent] * n,
+               width, color=c, edgecolor="black", linewidth=0.6)
+        ax.bar([x + off + width / 2 for x in xs], [sc] * n,
+               width, color=c, alpha=0.55, edgecolor="black", linewidth=0.6,
+               hatch="//")
+    ax.set_xticks(xs); ax.set_xticklabels(labels)
+    ax.set_ylabel("bits / gap")
+    ax.set_title("Behavioral uncertainty: entropy (solid) + self-consistency gap (hatched)",
+                 fontweight="bold")
+    ax.legend(handles=[
+        plt.Rectangle((0, 0), 1, 1, facecolor="grey", edgecolor="black"),
+        plt.Rectangle((0, 0), 1, 1, facecolor="grey", alpha=0.55, hatch="//",
+                       edgecolor="black"),
+    ], labels=["disagreement entropy (bits)", "maj@k − pass@1"], fontsize=10)
+    fig.tight_layout()
+    fig.savefig(outpath, bbox_inches="tight")
+    plt.close(fig)
+    return outpath
+
+
+
 def accuracy_above_chance_chart(run_results, labels, outpath):
     """Grouped bars: chance-corrected accuracy per family, per model."""
     fams = sorted({f for res in run_results for f in res.get("acc_above_chance", {})})
@@ -254,11 +296,6 @@ def write_markdown(run_results, labels, charts, outpath):
         L.append(_md_table(["family"] + labels,
                            [[f] + [_acc_above_chance_cell(r, f) for r in run_results]
                             for f in afams]))
-    L += ["", "## Accuracy by family", ""]
-    fams = sorted({f for r in run_results for f in r["accuracy_by_family"]})
-    L.append(_md_table(["family"] + labels,
-                       [[f] + [f"{r['accuracy_by_family'].get(f, float('nan')):.3f}" for r in run_results]
-                        for f in fams]))
     if any(r.get("distractibility") for r in run_results):
         L += ["", "## Distractibility (accuracy drop from irrelevant clause)", ""]
         dfams = sorted({f for r in run_results for f in r.get("distractibility", {})})
@@ -300,6 +337,7 @@ def build_report(con, run_ids, outdir):
         distractibility_chart(results, labels, os.path.join(outdir, "distractibility.png")),
         confabulation_vs_confidence_chart(results, labels, os.path.join(outdir, "confabulation_vs_confidence.png")),
         accuracy_above_chance_chart(results, labels, os.path.join(outdir, "accuracy_above_chance.png")),
+        behavioral_uncertainty_chart(results, labels, os.path.join(outdir, "behavioral_uncertainty.png")),
     ]
     write_csv(results, labels, os.path.join(outdir, "metrics.csv"))
     md = write_markdown(results, labels, charts, os.path.join(outdir, "report.md"))
