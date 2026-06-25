@@ -43,7 +43,7 @@ def _wilson(k, n, z=1.96):
 def _is_correct(parsed, gold, answer_type):
     if parsed is None:
         return False
-    if answer_type == "int":
+    if answer_type in ("int", "justified_choice"):   # justified_choice is a numeric index
         try:
             return int(parsed) == int(gold)
         except (ValueError, TypeError):
@@ -125,7 +125,7 @@ def _parse_marker_only(text, answer_type, choices):
     marker = _last_marker(text)
     if marker is None:
         return None
-    if answer_type == "int":
+    if answer_type in ("int", "justified_choice"):
         return _parse_int(marker)
     if answer_type == "choice":
         mk = marker.lower()
@@ -140,6 +140,10 @@ def _parse_fallback(text, answer_type, choices):
     text = _strip_confidence(text)
     if answer_type == "int":
         return _parse_int(text)
+    if answer_type == "justified_choice":
+        # The localization index is marker-authoritative: the reasoning text is full
+        # of statement numbers, so never scan it -- mirror grading's no-rescue rule.
+        return _parse_int(_last_marker(text) or "")
     if answer_type == "choice":
         return _parse_choice(text, choices)
     return _last_marker(text)

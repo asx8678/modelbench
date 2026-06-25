@@ -368,7 +368,7 @@ def test_verifier_catches_wrong_gold(family):
     # the true gold passes, a corrupted one fails — for every family.
     p = generators._mk(family, 3, 7, 0, False, "base", "g")
     assert generators.verify_gold(p) is True
-    if p.answer_type == "int":
+    if p.answer_type in ("int", "justified_choice"):   # justified_choice gold is an index
         bad = dataclasses.replace(p, gold=str(int(p.gold) + 1))
     else:
         bad = dataclasses.replace(p, gold=next(c for c in p.choices if c != p.gold))
@@ -498,6 +498,62 @@ def test_unsat_csp_label_prior_is_roughly_balanced():
         frac = labels[lab] / tot
         assert 0.15 < frac < 0.35, f"{lab} prior {frac:.2%} is too skewed"
     assert labels["UNDETERMINED"] / tot > 0.20    # the previously-rare class
+
+
+def test_unsat_localize_justification_is_load_bearing():
+    # H5/bench-xg3: localizing the flaw. The full statement set is unsatisfiable and
+    # EXACTLY ONE statement's removal restores a unique solution (the gold). The
+    # verifier is an entailment check: it re-derives that the gold index is the unique
+    # restorer, and rejects any other index — so it cannot be satisfied by guessing.
+    from collections import Counter
+    golds = Counter()
+    for diff in range(1, 5):
+        for seed in range(60):
+            p = generators._mk("unsat_localize", diff, seed, 0, False, "base", "g")
+            assert p.answer_type == "justified_choice"
+            assert generators.verify_gold(p) is True
+            names, stmts = generators._kk_parse_numbered(p.prompt)
+            slots = list(range(len(names)))
+            full = [stmts[i] for i in sorted(stmts)]
+            assert generators._kk_all_solutions(slots, full) == []   # unsatisfiable
+            # every WRONG index is rejected by the justification check
+            for i in sorted(stmts):
+                if str(i) != p.gold:
+                    assert generators._verify_unsat_localize(p.prompt, str(i)) is False
+            golds[p.gold] += 1
+    # The flaw's position is randomized, so no single index dominates: a prior-guesser
+    # (the unsat_csp sentinel weakness) cannot win. Modal index frequency stays low.
+    tot = sum(golds.values())
+    assert golds.most_common(1)[0][1] / tot < 0.30
+    assert len(golds) >= 6                                  # many distinct correct indices
+
+
+def test_unsat_localize_grading_is_marker_only_index():
+    # justified_choice: the answer is a statement NUMBER. The reasoning text is full of
+    # statement numbers, so grading must take the ANSWER marker's index and never
+    # rescue a number from the prose.
+    parsed, correct, _, src = grading.grade(
+        "Statements 2 and 5 look related, and 7 is odd, but the flaw is 3.\nANSWER: 3",
+        "justified_choice", "3")
+    assert parsed == "3" and correct and src == "marker"
+    # no marker -> no fallback rescue from the numbers mentioned in prose
+    parsed2, src2 = grading.parse_answer(
+        "I think statement 4 contradicts statement 1.", "justified_choice")
+    assert parsed2 is None and src2 == "none"
+
+
+def test_unsat_localize_flows_through_pipeline():
+    # justified_choice must run end-to-end through runner + metrics (new answer_type).
+    items = generators.build_dataset(["unsat_localize"], 1, 4, 3)
+    con, ds = _db_with(items)
+    runner.run(con, "uloc", ds, _cfg(mock="perfect"))
+    res = metrics.compute(con, "uloc")
+    assert res["overall_accuracy"] == 1.0
+    assert res["coverage"]["errored"] == 0
+    # the family is BOUNDED (a statement index), so its chance baseline is the modal
+    # index frequency, not 0 — and well below 1 (no dominant index).
+    chance = res["chance_baseline"]["unsat_localize"]
+    assert 0.0 < chance < 0.6
 
 
 def test_csp_puzzles_are_minimally_constrained():
@@ -912,6 +968,9 @@ def test_baseline_metrics_unchanged():
                 # bench-dqw adds the false_lemma and noise_haystack families.
                 top.pop("false_lemma", None)
                 top.pop("noise_haystack", None)
+                # bench-xg3 adds the unsat_localize family (justification
+                # localization, justified_choice answer_type).
+                top.pop("unsat_localize", None)
         return out
 
     assert json.dumps(per_family(res), sort_keys=True, indent=2) == \

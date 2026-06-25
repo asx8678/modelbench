@@ -294,7 +294,7 @@ def _mock_text(item, target, rnd, mode):
         ok = rnd.random() < p
     if ok:
         ans = target
-    elif item["answer_type"] == "int":
+    elif item["answer_type"] in ("int", "justified_choice"):
         ans = str(int(target) + rnd.choice([-3, -2, -1, 1, 2, 3]))
     else:
         opts = item["choices"].split("|")

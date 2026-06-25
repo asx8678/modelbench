@@ -82,6 +82,13 @@ def parse_answer(text: str, answer_type: str, choices: Optional[List[str]] = Non
             # set ('none', the all-knight puzzle) -- not a parse miss. So always take
             # the marker (possibly "") and never fall through to a full-text scan.
             parsed = ",".join(sorted(_split_set(marker)))
+        elif answer_type == "justified_choice":
+            # The answer is a statement NUMBER (a localization index). Take the first
+            # integer in the marker; the reasoning text enumerates many statement
+            # numbers, so -- like the CSP sentinels -- never rescue from full text.
+            nums = _INT.findall(marker.replace(",", ""))
+            if nums:
+                parsed = str(int(nums[0]))
         else:
             parsed = marker
         if parsed is not None:
@@ -163,7 +170,10 @@ def grade(text: str, answer_type: str, gold: str, choices=None,
           strict_mode: bool = False) -> Tuple[Optional[str], bool, Optional[int], str]:
     """Return (parsed_answer, is_correct, confidence, parse_source)."""
     parsed, parse_source = parse_answer(text, answer_type, choices, strict_mode=strict_mode)
-    if answer_type == "int":
+    if answer_type in ("int", "justified_choice"):
+        # justified_choice grades a localization INDEX: the gold is build-time
+        # validated by an entailment check (verify_gold), so an exact index match
+        # here is equivalent to the justification, with a prior-proof randomized index.
         try:
             correct = parsed is not None and int(parsed) == int(gold)
         except ValueError:

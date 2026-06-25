@@ -1188,6 +1188,142 @@ def _verify_unsat_csp(prompt, gold):
     return gold == "UNDETERMINED"
 
 
+# ------------------------------ 10b. unsat_localize (justification localization, H5)
+# An ill-posed knights-&-knaves puzzle where the task is to LOCALIZE the flaw: which
+# single numbered statement, if removed, restores a unique consistent assignment.
+# Unlike unsat_csp (answer one of four sentinels -- guessable by label prior), the
+# answer is a statement INDEX at a randomized position, and correctness is an
+# entailment/justification check (removing that statement must restore a UNIQUE
+# solution while the full set is unsatisfiable). Construction guarantees the flaw is
+# UNIQUELY localizable: the consistent statements form a "2-redundant" set (removing
+# any one still pins the same unique assignment), so once a single contradiction is
+# added, only removing THAT contradiction can restore satisfiability. (E5 / bench-xg3.)
+def _kk_sentence(st, names):
+    """Render one knights-&-knaves statement tuple as an English sentence."""
+    if st[0] == "ABS":
+        return (f"{names[st[1]]} says that {names[st[2]]} is a "
+                f"{'knight' if st[3] else 'knave'}.")
+    return (f"{names[st[1]]} says that {names[st[2]]} and {names[st[3]]} "
+            f"are {'the same type' if st[4] else 'different types'}.")
+
+
+def gen_unsat_localize(difficulty, structure_seed, surface_seed, distractor):
+    rs = _rng("uloc-struct", difficulty, structure_seed)
+    ru = _rng("uloc-surf", structure_seed, surface_seed)
+    n = difficulty + 2
+    slots = list(range(n))
+    typ = {s: rs.random() < 0.5 for s in slots}
+
+    pool = []
+    for x in slots:
+        others = [o for o in slots if o != x]
+        for y in others:
+            pool.append(("ABS", x, y, typ[x] == typ[y]))
+        for i in range(len(others)):
+            for j in range(i + 1, len(others)):
+                y, z = others[i], others[j]
+                pool.append(("REL", x, y, z, typ[x] == (typ[y] == typ[z])))
+    rs.shuffle(pool)
+
+    # Minimal uniquely-solvable set, then grow to "2-redundant": removing ANY single
+    # clue still leaves the unique solution typ. That invariant makes the added
+    # contradiction the ONLY statement whose removal can restore satisfiability.
+    remaining = _kk_all_solutions(slots, [])
+    chosen, changed = [], True
+    while len(remaining) > 1 and changed:
+        changed = False
+        for st in pool:
+            if st in chosen:
+                continue
+            nr = [t for t in remaining if _kk_consistent(st, t)]
+            if len(nr) < len(remaining):
+                chosen.append(st); remaining = nr; changed = True
+                if len(remaining) == 1:
+                    break
+
+    def two_redundant(s):
+        return (len(_kk_all_solutions(slots, s)) == 1 and
+                all(len(_kk_all_solutions(slots, s[:i] + s[i + 1:])) == 1
+                    for i in range(len(s))))
+
+    over = list(chosen)
+    for st in [s for s in pool if s not in over and _kk_consistent(s, typ)]:
+        if two_redundant(over):
+            break
+        over.append(st)
+
+    # A statement inconsistent with typ (a knight asserting a falsehood, or a knave a
+    # truth). One always exists for n >= 2.
+    contradiction = None
+    for x in slots:
+        for y in slots:
+            if x == y:
+                continue
+            for want in (True, False):
+                st = ("ABS", x, y, want)
+                if not _kk_consistent(st, typ):
+                    contradiction = st
+                    break
+            if contradiction:
+                break
+        if contradiction:
+            break
+
+    statements = over + [contradiction]
+    rs.shuffle(statements)                  # randomize the flaw's position (prior-proof)
+    gold = str(statements.index(contradiction) + 1)        # 1-indexed
+
+    names = ru.sample(NAMES, n)
+    numbered = "\n".join(f"{i + 1}. {_kk_sentence(st, names)}"
+                         for i, st in enumerate(statements))
+    prompt = ("On an island, every inhabitant is either a knight (who always tells the "
+              "truth) or a knave (who always lies). Its inhabitants are "
+              + ", ".join(names) + ". They make the following numbered statements:\n"
+              + numbered
+              + "\nThese statements cannot all hold at once. Exactly one of them is "
+                "inconsistent with the rest: remove that single statement and the "
+                "remaining statements pin down a unique knight/knave assignment. "
+                "Which statement number must be removed? Answer with the number alone.")
+    return prompt, gold, "justified_choice", None
+
+
+def _kk_parse_numbered(prompt):
+    """Re-derive (names, {index: statement}) from a numbered knights-&-knaves list."""
+    m = re.search(r"inhabitants are (.+?)\. They make", prompt, re.S)
+    names = [x.strip() for x in m.group(1).split(",")] if m else []
+    idx = {nm: i for i, nm in enumerate(names)}
+    stmts = {}
+    for mm in re.finditer(r"^(\d+)\. (\w+) says that (\w+) is a (knight|knave)\.",
+                          prompt, re.M):
+        i, x, y = int(mm.group(1)), mm.group(2), mm.group(3)
+        if x in idx and y in idx:
+            stmts[i] = ("ABS", idx[x], idx[y], mm.group(4) == "knight")
+    for mm in re.finditer(r"^(\d+)\. (\w+) says that (\w+) and (\w+) are "
+                          r"(the same type|different types)\.", prompt, re.M):
+        i, x, y, z = int(mm.group(1)), mm.group(2), mm.group(3), mm.group(4)
+        if x in idx and y in idx and z in idx:
+            stmts[i] = ("REL", idx[x], idx[y], idx[z], mm.group(5) == "the same type")
+    return names, stmts
+
+
+def _verify_unsat_localize(prompt, gold):
+    """Justification check: the full statement set must be UNSATISFIABLE, and the gold
+    index must be the UNIQUE statement whose removal restores a unique solution."""
+    names, stmts = _kk_parse_numbered(prompt)
+    if not names or not stmts:
+        return False
+    slots = list(range(len(names)))
+    all_idx = sorted(stmts)
+    if _kk_all_solutions(slots, [stmts[i] for i in all_idx]):   # must be unsatisfiable
+        return False
+    restorers = [i for i in all_idx
+                 if len(_kk_all_solutions(slots, [stmts[j] for j in all_idx if j != i])) == 1]
+    try:
+        return restorers == [int(gold)]
+    except (TypeError, ValueError):
+        return False
+
+
 # ------------------------------------------------ 11. dynamic_pivot (true backtracking)
 # Genuine commit-then-backtrack (E3/H3). Turn 1 asks for the count under the literal
 # reading -- the model COMMITS the sub-gold WITHOUT yet seeing the pivot. Turn 2 reveals
@@ -1381,6 +1517,7 @@ GENERATORS = {
     "composed": gen_composed,
     "redefined_ops": gen_redefined_ops,
     "unsat_csp": gen_unsat_csp,
+    "unsat_localize": gen_unsat_localize,
     "dynamic_pivot": gen_dynamic_pivot,
     "false_lemma": gen_false_lemma,
     "noise_haystack": gen_noise_haystack,
@@ -1405,7 +1542,7 @@ REQUIRES_SEQUENTIAL_TURNS = {"dynamic_pivot"}
 # "difficulties" that are not actually harder or not feasible to verify.
 #   sequences      : rule-complexity tier 1..6
 FAMILY_MAX_DIFF = {"sequences": 6, "knights_knaves": 6, "logic_grid": 5, "composed": 5,
-                    "unsat_csp": 6}
+                    "unsat_csp": 6, "unsat_localize": 4}
 # difficulty == number of update operations before the pivot, so it is a depth axis.
 
 # What the `difficulty` integer MEANS per family (bench-lop / E6). For most
@@ -1419,6 +1556,7 @@ DIFFICULTY_AXIS = {
     "knights_knaves": "islanders (n)",
     "logic_grid": "floors (n)",
     "unsat_csp": "islanders (n)",
+    "unsat_localize": "islanders (n)",
     "composed": "chain / per-hop difficulty",
 }
 
@@ -1781,6 +1919,7 @@ _VERIFIERS = {
     "composed": _verify_composed,
     "redefined_ops": _verify_redefined_ops,
     "unsat_csp": _verify_unsat_csp,
+    "unsat_localize": _verify_unsat_localize,
     "dynamic_pivot": _verify_dynamic_pivot,
     "false_lemma": _verify_false_lemma,
     "noise_haystack": _verify_arithmetic,        # core is arithmetic; decoys are subject-inert
