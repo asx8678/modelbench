@@ -221,7 +221,7 @@ def test_composed_perturb_hop_a_changes_final_gold():
 def test_confidence_value_not_used_as_answer():
     # The dangerous case: confidence equals gold and the model gave no numeric
     # answer. The old fallback grabbed the CONFIDENCE digits -> spurious "correct".
-    parsed, correct, conf = grading.grade("I am not sure of the count.\nCONFIDENCE: 13",
+    parsed, correct, conf, _ = grading.grade("I am not sure of the count.\nCONFIDENCE: 13",
                                           "int", "13")
     assert conf == 13
     assert parsed is None
@@ -230,47 +230,44 @@ def test_confidence_value_not_used_as_answer():
 
 def test_int_fallback_still_finds_a_stated_number():
     # stripping the confidence line must not stop us finding a real trailing number
-    parsed, correct, _ = grading.grade("so the result is 13.\nCONFIDENCE: 80", "int", "13")
+    parsed, correct, _, _ = grading.grade("so the result is 13.\nCONFIDENCE: 80", "int", "13")
     assert parsed == "13" and correct
 
 
 def test_grading_well_formed():
-    parsed, correct, conf = grading.grade("work...\nANSWER: 13\nCONFIDENCE: 80", "int", "13")
+    parsed, correct, conf, _ = grading.grade("work...\nANSWER: 13\nCONFIDENCE: 80", "int", "13")
     assert parsed == "13" and correct and conf == 80
 
 
 def test_grading_choice_fallback():
-    parsed, correct, _ = grading.grade("so the tallest is Diego.", "choice", "Diego",
+    parsed, correct, _, _ = grading.grade("so the tallest is Diego.", "choice", "Diego",
                                        ["Diego", "Lena"])
     assert correct
 
 
 def test_grading_int_strips_thousands_separator():
     # CSP/arithmetic answers can be large; "1,234" must read as 1234, not 1.
-    parsed, correct, _ = grading.grade("After working it out,\nANSWER: 1,234", "int", "1234")
+    parsed, correct, _, _ = grading.grade("After working it out,\nANSWER: 1,234", "int", "1234")
     assert parsed == "1234" and correct
 
 
 def test_grading_int_handles_negative():
-    parsed, correct, _ = grading.grade("the net change is -5.\nANSWER: -5", "int", "-5")
+    parsed, correct, _, _ = grading.grade("the net change is -5.\nANSWER: -5", "int", "-5")
     assert parsed == "-5" and correct
 
 
 def test_grading_marker_overrides_earlier_wrong_mention():
     # The model second-guesses itself in prose; the ANSWER line is authoritative,
     # so an earlier wrong name/number in the reasoning must not be scored.
-    p_choice, ok_choice, _ = grading.grade(
-        "At first Diego looks tallest, but no.\nANSWER: Lena", "choice", "Lena", ["Diego", "Lena"])
+    p_choice, ok_choice, _, _ = grading.grade("At first Diego looks tallest, but no.\nANSWER: Lena", "choice", "Lena", ["Diego", "Lena"])
     assert p_choice == "Lena" and ok_choice
-    p_int, ok_int, _ = grading.grade(
-        "I initially get 7, but rechecking it is 4.\nANSWER: 4", "int", "4")
+    p_int, ok_int, _, _ = grading.grade("I initially get 7, but rechecking it is 4.\nANSWER: 4", "int", "4")
     assert p_int == "4" and ok_int
 
 
 def test_grading_choice_marker_with_extra_words():
     # marker line carries justification around the choice token
-    parsed, correct, _ = grading.grade(
-        "ANSWER: The knight is Lena.", "choice", "Lena", ["Diego", "Lena", "Omar"])
+    parsed, correct, _, _ = grading.grade("ANSWER: The knight is Lena.", "choice", "Lena", ["Diego", "Lena", "Omar"])
     assert parsed == "Lena" and correct
 
 

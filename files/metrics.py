@@ -12,14 +12,16 @@ Key principles from the methodology:
 """
 
 import math
+import re
 from collections import defaultdict, Counter
 import numpy as np
 
 
 def _fetch(con, run_id):
     """One row per (item, sample) joined with its dataset metadata."""
-    q = """SELECT r.item_id, r.sample_idx, r.correct, r.confidence, r.parsed,
-                  d.family, d.difficulty, d.probe, d.grp, d.gold, d.answer_type
+    q = """SELECT r.item_id, r.sample_idx, r.correct, r.confidence, r.parsed, r.raw,
+                  d.family, d.difficulty, d.probe, d.grp, d.gold, d.answer_type,
+                  d.choices
            FROM responses r JOIN dataset d ON r.item_id = d.item_id
            WHERE r.run_id = ?"""
     return [dict(x) for x in con.execute(q, (run_id,))]
@@ -47,22 +49,91 @@ def _is_correct(parsed, gold, answer_type):
     return str(parsed).lower() == str(gold).lower()
 
 
+def _chance_baseline(family, difficulty):
+    if family == "ordering":
+        return 1.0 / (difficulty + 2)
+    if family == "knights_knaves":
+        return 1.0 / (difficulty + 3)
+    if family == "logic_grid":
+        return 1.0 / (difficulty + 2)
+    if family in ("arithmetic", "state_tracking", "sequences"):
+        return 0.0
+    if family in ("composed", "retroactive_edit", "multi_turn_inject"):
+        return 0.0
+    return 0.0
+
+
+# ---- helpers for re-parsing raw responses (marker vs fallback)
+_ANS = re.compile(r"(?im)^\s*answer\s*[:=]\s*(.+?)\s*$")
+_CONF = re.compile(r"(?im)^\s*confidence\s*[:=]\s*(\d{1,3})")
+_INT = re.compile(r"-?\d+")
+
+
+def _last_marker(text):
+    m = list(_ANS.finditer(text))
+    return m[-1].group(1).strip() if m else None
+
+
+def _strip_confidence(text):
+    return _CONF.sub("", text)
+
+
+def _parse_int(text):
+    nums = _INT.findall(text.replace(",", ""))
+    return str(int(nums[-1])) if nums else None
+
+
+def _parse_choice(text, choices):
+    if not choices:
+        return None
+    last, pos = None, -1
+    for c in choices:
+        for hit in re.finditer(rf"\b{re.escape(c.lower())}\b", text.lower()):
+            if hit.start() > pos:
+                pos, last = hit.start(), c
+    return last
+
+
+def _parse_marker_only(text, answer_type, choices):
+    marker = _last_marker(text)
+    if marker is None:
+        return None
+    if answer_type == "int":
+        return _parse_int(marker)
+    if answer_type == "choice":
+        mk = marker.lower()
+        for c in choices or []:
+            if re.search(rf"\b{re.escape(c.lower())}\b", mk):
+                return c
+        return None
+    return marker
+
+
+def _parse_fallback(text, answer_type, choices):
+    text = _strip_confidence(text)
+    if answer_type == "int":
+        return _parse_int(text)
+    if answer_type == "choice":
+        return _parse_choice(text, choices)
+    return _last_marker(text)
+
+
 def compute(con, run_id):
     rows = _fetch(con, run_id)
     if not rows:
         return {"error": "no responses for run"}
 
-    META_KEYS = ("family", "difficulty", "probe", "grp", "gold", "answer_type")
+    META_KEYS = ("family", "difficulty", "probe", "grp", "gold", "answer_type", "choices")
     meta = {}                       # item_id -> static metadata
     s0_correct = {}                 # item_id -> bool (sample 0, only if not an error)
     s0_parsed = {}                  # item_id -> parsed answer (sample 0)
     s0_conf = {}                    # item_id -> confidence (sample 0)
-    samples = defaultdict(list)     # item_id -> [(idx, correct, parsed), ...]
+    samples = defaultdict(list)     # item_id -> [(idx, correct, parsed, raw), ...]
     nsamples = 0
     for r in rows:
         iid = r["item_id"]
         meta.setdefault(iid, {k: r[k] for k in META_KEYS})
-        samples[iid].append((r["sample_idx"], r["correct"], r["parsed"]))
+        samples[iid].append((r["sample_idx"], r["correct"], r["parsed"], r["raw"]))
         nsamples = max(nsamples, r["sample_idx"] + 1)
         if r["sample_idx"] == 0:
             s0_parsed[iid] = r["parsed"]
@@ -189,13 +260,13 @@ def compute(con, run_id):
         p1, maj, oracle = [], [], []
         for i in base:
             ss = samples[i]
-            cs = [c for _, c, _ in ss if c is not None]
+            cs = [c for _, c, _, _ in ss if c is not None]
             if not cs:
                 continue                            # all samples errored
             if i in s0_correct:
                 p1.append(s0_correct[i])
             oracle.append(any(bool(c) for c in cs))
-            votes = [p for _, _, p in ss if p is not None]
+            votes = [p for _, _, p, _ in ss if p is not None]
             if votes:
                 win = Counter(votes).most_common(1)[0][0]
                 maj.append(_is_correct(win, meta[i]["gold"], meta[i]["answer_type"]))
@@ -204,10 +275,50 @@ def compute(con, run_id):
                  "maj@k": float(np.mean(maj)) if maj else 0.0,
                  "pass@k_oracle": float(np.mean(oracle)) if oracle else 0.0}
 
+    # ---- chance-corrected accuracy per family
+    chance_baseline = {}
+    acc_above_chance = {}
+    for fam, vals in by_fam.items():
+        chances = [_chance_baseline(meta[i]["family"], meta[i]["difficulty"])
+                   for i in base
+                   if meta[i]["family"] == fam and i in s0_correct]
+        chance = float(np.mean(chances)) if chances else 0.0
+        chance_baseline[fam] = chance
+        acc = fam_acc[fam]
+        acc_above_chance[fam] = float((acc - chance) / (1.0 - chance)) if chance > 0 else acc
+
+    frontier_headroom = None
+    if passk is not None:
+        frontier_headroom = passk["pass@k_oracle"] - passk["pass@1"]
+
+    # ---- grading fragility: marker-only vs fallback parse disagreement rate
+    frag_disagree = 0
+    frag_total = 0
+    for i in base:
+        answer_type = meta[i]["answer_type"]
+        choices = meta[i].get("choices")
+        if isinstance(choices, str) and choices:
+            choices = choices.split("|")
+        elif not choices:
+            choices = None
+        for _, _, _, raw in samples[i]:
+            if raw == "__ERROR__" or raw is None:
+                continue
+            pm = _parse_marker_only(raw, answer_type, choices)
+            pf = _parse_fallback(raw, answer_type, choices)
+            frag_total += 1
+            if pm != pf:
+                frag_disagree += 1
+    grading_fragility = float(frag_disagree / frag_total) if frag_total else None
+
     return {
         "run_id": run_id, "n_items": n_items, "samples_per_item": nsamples,
         "coverage": coverage,
         "overall_accuracy": overall, "accuracy_by_family": fam_acc,
+        "chance_baseline": chance_baseline,
+        "acc_above_chance": acc_above_chance,
+        "frontier_headroom": frontier_headroom,
+        "grading_fragility": grading_fragility,
         "degradation": {f: dict(d) for f, d in curve.items()},
         "distractibility": distract, "invariance": invariance,
         "calibration": calibration, "passk": passk,

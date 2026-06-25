@@ -36,7 +36,7 @@ except Exception:                               # optional dependency
 SYSTEM = "You are a careful reasoning assistant. Work through each problem step by step."
 
 # raw/parsed/correct/confidence/latency/prompt_tokens/completion_tokens
-_ERROR_ROW = (storage.ERROR_MARKER, None, None, None, 0, None, None)
+_ERROR_ROW = (storage.ERROR_MARKER, None, None, None, 0, None, None, None)
 
 # errors worth retrying: transport problems and malformed/oddly-shaped responses
 _RETRYABLE = (urllib.error.URLError, urllib.error.HTTPError, TimeoutError,
@@ -277,12 +277,12 @@ def _process(item, cfg):
         latency = int((time.time() - t0) * 1000)
         if err is not None:
             last_err = err
-            rows.append((storage.ERROR_MARKER, None, None, None, latency, None, None))
+            rows.append((storage.ERROR_MARKER, None, None, None, latency, None, None, None))
             continue
-        parsed, correct, conf = grading.grade(
+        parsed, correct, conf, parse_source = grading.grade(
             text, item["answer_type"], item["gold"],
             item["choices"].split("|") if item.get("choices") else None)
-        rows.append((text, parsed, correct, conf, latency, ptok, ctok))
+        rows.append((text, parsed, correct, conf, latency, ptok, ctok, parse_source))
     return item["item_id"], rows, (str(last_err) if last_err else None)
 
 
@@ -300,8 +300,9 @@ def run(con, run_id, items, cfg):
                 item_id, rows, err = fut.result()
             except Exception as e:                       # never let one item abort the run
                 item_id, rows, err = futs[fut]["item_id"], [_ERROR_ROW], str(e)
-            for i, (raw, parsed, correct, conf, lat, pt, ct) in enumerate(rows):
-                storage.save_response(con, run_id, item_id, i, raw, parsed, correct, conf, lat, pt, ct)
+            for i, (raw, parsed, correct, conf, lat, pt, ct, parse_source) in enumerate(rows):
+                storage.save_response(con, run_id, item_id, i, raw, parsed, correct, conf, lat, pt, ct,
+                                    metadata={"parse_source": parse_source})
             n_done += 1
             if err:
                 n_err += 1

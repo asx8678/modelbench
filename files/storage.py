@@ -30,6 +30,16 @@ CREATE TABLE IF NOT EXISTS responses (
     UNIQUE(run_id, item_id, sample_idx)
 );
 CREATE INDEX IF NOT EXISTS idx_resp ON responses(run_id, item_id);
+CREATE TABLE IF NOT EXISTS telemetry (
+    run_id TEXT, item_id TEXT, sample_idx INTEGER,
+    capabilities TEXT,
+    reasoning_token_source TEXT,
+    prompt_tokens INTEGER, completion_tokens INTEGER, reasoning_tokens INTEGER,
+    reasoning_density_proxy REAL,
+    ttft_ms INTEGER, first_reasoning_ms INTEGER, reasoning_wall_ms INTEGER, answer_wall_ms INTEGER,
+    unobservable_fields TEXT,
+    UNIQUE(run_id, item_id, sample_idx)
+);
 """
 
 ERROR_MARKER = "__ERROR__"
@@ -91,3 +101,39 @@ def done_items(con, run_id):
     return {r["item_id"] for r in con.execute(
         "SELECT item_id FROM responses WHERE run_id=? GROUP BY item_id HAVING SUM(raw=?)=0",
         (run_id, ERROR_MARKER))}
+
+def save_telemetry(con, run_id, item_id, sample_idx, *, capabilities=None,
+                   reasoning_token_source=None, prompt_tokens=None,
+                   completion_tokens=None, reasoning_tokens=None,
+                   reasoning_density_proxy=None, ttft_ms=None,
+                   first_reasoning_ms=None, reasoning_wall_ms=None,
+                   answer_wall_ms=None, unobservable_fields=None):
+    con.execute(
+        """INSERT OR REPLACE INTO telemetry
+           (run_id, item_id, sample_idx, capabilities, reasoning_token_source,
+            prompt_tokens, completion_tokens, reasoning_tokens,
+            reasoning_density_proxy, ttft_ms, first_reasoning_ms,
+            reasoning_wall_ms, answer_wall_ms, unobservable_fields)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (run_id, item_id, sample_idx,
+         json.dumps(capabilities) if capabilities is not None else None,
+         reasoning_token_source,
+         prompt_tokens, completion_tokens, reasoning_tokens,
+         reasoning_density_proxy, ttft_ms, first_reasoning_ms,
+         reasoning_wall_ms, answer_wall_ms,
+         json.dumps(unobservable_fields) if unobservable_fields is not None else None),
+    )
+
+
+def load_telemetry(con, run_id, item_id, sample_idx):
+    row = con.execute(
+        "SELECT * FROM telemetry WHERE run_id=? AND item_id=? AND sample_idx=?",
+        (run_id, item_id, sample_idx),
+    ).fetchone()
+    if row is None:
+        return None
+    d = dict(row)
+    for k in ("capabilities", "unobservable_fields"):
+        if d.get(k) is not None:
+            d[k] = json.loads(d[k])
+    return d

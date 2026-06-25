@@ -11,6 +11,8 @@ reasoning-bench CLI.
 Run `python cli.py <command> -h` for options.
 """
 
+import json
+
 import os
 import sys
 import argparse
@@ -68,11 +70,45 @@ def cmd_run(a):
         temperature=a.temperature, max_tokens=max_tokens, context_window=context_window,
         n=a.samples, workers=a.workers, timeout=a.timeout, retries=a.retries,
         ask_confidence=a.confidence, resume=a.resume, mock=a.mock,
+        dataset_tag=a.dataset_tag,
         capabilities=ep.get("capabilities", []))
     run_id = a.run_id or (f"mock-{a.mock}" if a.mock else (a.model or model_id).replace("/", "_"))
     runner.run(con, run_id, items, cfg)
     metrics.print_summary(metrics.compute(con, run_id))
 
+
+
+def _params_for_run(con, run_id):
+    row = con.execute("SELECT params FROM runs WHERE run_id=?", (run_id,)).fetchone()
+    if not row or not row["params"]:
+        return {}
+    return json.loads(row["params"])
+
+
+def _families_for_run(con, run_id):
+    rows = con.execute(
+        "SELECT DISTINCT d.family FROM dataset d "
+        "JOIN responses r ON d.item_id = r.item_id WHERE r.run_id=?",
+        (run_id,),
+    )
+    return {row["family"] for row in rows}
+
+
+def _warn_if_dataset_tags_mismatch(con, run_ids):
+    if len(run_ids) < 2:
+        return
+    tags, families = {}, {}
+    for rid in run_ids:
+        tags[rid] = _params_for_run(con, rid).get("dataset_tag", "")
+        families[rid] = _families_for_run(con, rid)
+    for i, rid1 in enumerate(run_ids):
+        for rid2 in run_ids[i + 1 :]:
+            if tags[rid1] != tags[rid2] and families[rid1] & families[rid2]:
+                print(
+                    f"warning: runs {rid1} and {rid2} have different dataset tags "
+                    f"('{tags[rid1]}' vs '{tags[rid2]}') and share families; "
+                    "comparisons may be invalid."
+                )
 
 def cmd_report(a):
     import report  # lazy: only this command needs matplotlib
@@ -80,9 +116,11 @@ def cmd_report(a):
     rids = a.runs or [r["run_id"] for r in storage.list_runs(con)]
     if not rids:
         sys.exit("no runs found")
+    _warn_if_dataset_tags_mismatch(con, rids)
     for rid in rids:
         metrics.print_summary(metrics.compute(con, rid))
     report.build_report(con, rids, a.out)
+
 
 
 def cmd_list(a):
@@ -124,7 +162,7 @@ def cmd_models(a):
               f"ctx={cw if cw else '?'}{mt}")
 
 
-def main():
+def _parse_args(argv=None):
     p = argparse.ArgumentParser(prog="reasoning-bench", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -160,6 +198,7 @@ def main():
     r.add_argument("--resume", action="store_true", help="skip items already done")
     r.add_argument("--mock", choices=["perfect", "random", "noisy"], default=None,
                    help="synthesize answers without a server (pipeline test)")
+    r.add_argument("--dataset-tag", default="", help="dataset version tag for run comparisons")
     r.set_defaults(func=cmd_run)
 
     rep = sub.add_parser("report", help="metrics + charts")
@@ -176,7 +215,11 @@ def main():
     pr = sub.add_parser("providers", help="list configured providers"); pr.set_defaults(func=cmd_providers)
     mo = sub.add_parser("models", help="list configured model aliases"); mo.set_defaults(func=cmd_models)
 
-    a = p.parse_args()
+    return p.parse_args(argv)
+
+
+def main():
+    a = _parse_args()
     a.func(a)
 
 
