@@ -16,6 +16,10 @@ problems.
 > orientation map; [`files/README.md`](files/README.md) is the in-depth operator
 > manual for the same tool.
 
+> **Just want to run it?** → **[GETTING_STARTED.md](GETTING_STARTED.md)** is a
+> copy-paste walkthrough: install, launch, point it at a model, and read the results.
+> The 30-second version: `cd files && pip install -r requirements.txt && python cli.py start`.
+
 ---
 
 ## Table of contents
