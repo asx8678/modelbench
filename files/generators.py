@@ -104,10 +104,13 @@ def gen_arithmetic(difficulty, structure_seed, surface_seed, distractor):
             clauses.append(f"{name} divides the {item} into {f} equal groups and keeps one group.")
 
     if distractor:
+        # NoOp distractor in the SAME surface form as a real update, about a
+        # different person (the subject-keyed verifier skips it). No stock
+        # phrase or foreign item to key on -- the model must track the subject.
         oname = rd.choice([n for n in NAMES if n != name])
-        oitem = rd.choice([it for it in ITEMS if it != item])
+        verb = rd.choice(["buys", "finds", "is given", "picks up"])
         ox = rd.randint(2, 20)
-        clauses.insert(1, f"{oname} also has {ox} {oitem} in a basket.")
+        clauses.insert(1, f"{oname} {verb} {ox} more {item}.")
 
     prompt = " ".join(clauses) + f" How many {item} does {name} have now?"
     return prompt, str(current), "int", None
@@ -145,9 +148,12 @@ def gen_state(difficulty, structure_seed, surface_seed, distractor):
 
     qi = rs.randrange(3)
     if distractor:
+        # NoOp distractor phrased like an initial container declaration, about a
+        # container that is never updated or queried. The verifier parses it but
+        # never reads it; no "A nearby" stock phrase to key on.
         oc = rd.choice([c for c in CONTAINERS if c not in names])
         ox = rd.randint(3, 15)
-        clauses.insert(3, f"A nearby {oc} also holds {ox} {item}.")
+        clauses.insert(3, f"{oc.capitalize()} has {ox} {item}.")
 
     prompt = " ".join(clauses) + f" How many {item} are in {names[qi]} now?"
     return prompt, str(state[qi]), "int", None
@@ -203,11 +209,17 @@ def gen_retroactive_edit(difficulty, structure_seed, surface_seed, distractor):
         k = rs.randint(1, 3)
         clauses.append(f"{k} {item} are added to {names[edit_i]}.")
 
-    qi = rs.randrange(3)
+    # Query the EDITED container so the retroactive edit is ALWAYS load-bearing:
+    # the queried final value carries a coefficient-1 dependence on the scaled
+    # initial amount, so a different factor always changes the gold. (Querying an
+    # independent container made the "Actually..." pivot a no-op ~2/3 of the time.)
+    qi = edit_i
     if distractor:
+        # NoOp distractor phrased like an initial declaration (never edited or
+        # queried), with no "A nearby" stock phrase.
         oc = ru.choice([c for c in CONTAINERS if c not in names])
         ox = ru.randint(3, 15)
-        clauses.insert(3, f"A nearby {oc} also holds {ox} {item}.")
+        clauses.insert(3, f"{oc.capitalize()} has {ox} {item}.")
 
     prompt = " ".join(clauses) + f" How many {item} are in {names[qi]} now?"
     # Recompute gold from the INITIAL state, with the edit applied, then replay
@@ -336,7 +348,19 @@ def gen_order(difficulty, structure_seed, surface_seed, distractor):
             clauses.append(f"{b} is {anti} than {a}.")
 
     if distractor:
-        clauses.insert(0, f"{rd.choice(order)} is wearing a {rd.choice(COLORS)} hat.")
+        # NoOp distractor: a non-comparison fact about someone in the ordering.
+        # The ordering grammar is comparison-only, so a NoOp must be
+        # non-comparative; rotating templates removes the single fixed stock
+        # phrase, so the model must recognise the clause doesn't constrain rank.
+        who = rd.choice(order)
+        months = ("April", "July", "October", "January")
+        drinks = ("coffee", "tea", "juice", "cocoa")
+        clauses.insert(0, rd.choice([
+            f"{who} is wearing a {rd.choice(COLORS)} hat.",
+            f"{who} owns a {rd.choice(COLORS)} bicycle.",
+            f"{who} was born in {rd.choice(months)}.",
+            f"{who} usually drinks {rd.choice(drinks)} in the morning.",
+        ]))
 
     prompt = " ".join(clauses) + f" Who is the {rank_word} {sup_hi}?"
     return prompt, gold, "choice", names
@@ -556,44 +580,43 @@ def gen_logic_grid(difficulty, structure_seed, surface_seed, distractor):
 
 
 # ---------------------------------------------------------- 7. composed
-# Chain >=3 execution-dependency hops: knights_knaves knight-count seeds the
-# starting value of an arithmetic chain, whose final result indexes an ordering
-# query. The prompt embeds every hop so each can be verified independently.
+# Chain three genuinely load-bearing hops: a knights_knaves knight-count K
+# (deduced, never printed) seeds an arithmetic chain -> R; solving an ordering
+# yields C, the position of a named inhabitant; the final gold is R * C, so a
+# slip in ANY hop changes the answer. Every hop is embedded so each can be
+# verified independently.
 
 def _composed_parse_hops(prompt):
-    """Return dict with keys: knights_prompt, arith_prompt, arith_subj.
+    """Return dict: knights_prompt, arith_prompt, arith_subj, order_block, pivot.
 
-    Stage 3 (the ordering block) is a distractor/red-herring that no
-    longer contributes to the answer; the final gold is the raw
-    integer from Stage 2. The parser therefore only extracts the
-    knights and arithmetic stages.
+    All three stages are load-bearing. Stage 1 (knights) yields a count K that
+    seeds Stage 2 (arithmetic -> R). Stage 3 (ordering) yields C, the position
+    of `pivot`; the gold is R * C. The parser extracts each stage from the
+    prompt text so the verifier can re-derive every hop independently.
     """
     m = re.search(
-        r"Stage 1: On an island(.+?)\n+Stage 2:\s*(.+?)\n+",
+        r"Stage 1:\s*(.+?)\n+Stage 2:\s*(.+?)\n+Stage 3:\s*(.+)$",
         prompt, re.S,
     )
     if not m:
         return None
-    knights_block = "On an island" + m.group(1).strip()
-    arith_subj = m.group(2).strip()
-    # The arithmetic block is everything from after the subject line
-    # up to either the next "Stage" marker or the "Use this number"
-    # sentence (whichever comes first). The subject line is the
-    # first sentence of Stage 2; the remaining sentences are the
-    # arithmetic updates.
-    m2 = re.search(
-        r"Stage 2:\s*" + re.escape(arith_subj) + r"\s*(.+?)(?:\n+Stage|\n+What is it|$)",
-        prompt, re.S,
-    )
-    if not m2:
-        # Fallback: just take the rest of Stage 2 as the body.
-        body = prompt.split(arith_subj, 1)[1] if arith_subj in prompt else ""
-    else:
-        body = m2.group(1).strip()
+    knights_block = m.group(1).strip()
+    stage2 = m.group(2).strip()
+    stage3 = m.group(3).strip()
+    # Stage 2: drop the trailing "Let R be ..." gloss; keep the arithmetic
+    # (the "starts with as many ..." opener plus the update sentences).
+    arith_prompt = re.split(r"\n+Let R be\b", stage2)[0].strip()
+    sm = re.match(r"(\S[^\n]*?) starts with as many", arith_prompt)
+    arith_subj = sm.group(1).strip() if sm else None
+    # Stage 3: the named pivot whose 1-indexed position is C.
+    pm = re.search(r"position 1, what is (.+?)'s position", stage3)
+    pivot = pm.group(1).strip() if pm else None
     return {
         "knights_prompt": knights_block,
-        "arith_prompt": arith_subj + " " + body,
+        "arith_prompt": arith_prompt,
         "arith_subj": arith_subj,
+        "order_block": stage3,
+        "pivot": pivot,
     }
 
 
@@ -602,30 +625,39 @@ def _verify_composed(prompt, gold):
     parsed = _composed_parse_hops(prompt)
     if not parsed:
         return False
-    # Re-derive the arithmetic total from Stage 2 starting from the
-    # knight count in Stage 1. The final gold is the raw integer
-    # (no modulo wrap into Stage 3).
-    kk_prompt = parsed["knights_prompt"]
-    kk_names, kk_stmts = _kk_parse(kk_prompt)
+    # Hop A: re-derive the knight count K from Stage 1's clues.
+    kk_names, kk_stmts = _kk_parse(parsed["knights_prompt"])
     if not kk_names or not kk_stmts:
         return False
     sols = _kk_all_solutions(kk_names, kk_stmts)
     if len(sols) != 1:
         return False
     knight_count = sum(1 for v in sols[0].values() if v)
-    arith_total = _verify_arithmetic_raw(parsed["arith_prompt"], knight_count)
-    if arith_total is None:
+    # Hop B: replay Stage 2's arithmetic seeded by K -> R.
+    arith_result = _verify_arithmetic_raw(parsed["arith_prompt"], knight_count)
+    if arith_result is None:
         return False
+    # Hop C: re-solve Stage 3's ordering -> C, the pivot's 1-indexed position.
+    pivot = parsed.get("pivot")
+    order, _expected = _verify_order_raw(parsed.get("order_block", ""), "")
+    if not pivot or order is None or pivot not in order:
+        return False
+    count_c = order.index(pivot) + 1
     try:
-        return int(gold) == int(arith_total)
+        return int(gold) == arith_result * count_c
     except (TypeError, ValueError):
         return False
 
 
 
 def _verify_arithmetic_raw(prompt, start):
-    """Re-derive the arithmetic result given an explicit starting integer."""
-    m = re.search(r"^(\S[^\n]*) starts with (\d+)", prompt, re.M)
+    """Re-derive the arithmetic result given an explicit starting integer.
+
+    The opener references the start verbally ("starts with as many ... as
+    there are knights"), so the integer itself is never read from the text --
+    only the subject name is, and the caller supplies the start.
+    """
+    m = re.search(r"^(\S[^\n]*?) starts with as many\b", prompt, re.M)
     if not m:
         return None
     subj = m.group(1).strip()
@@ -695,28 +727,42 @@ def _verify_order_raw(prompt, query):
 
 
 def gen_composed(difficulty, structure_seed, surface_seed, distractor):
-    """Chain >=3 execution-dependency hops: knights -> arithmetic -> ordering."""
+    """Chain three genuinely load-bearing hops: knights -> arithmetic -> ordering.
+
+    Every hop affects the final integer, so none can be skipped:
+      * Hop A (knights): the model must DEDUCE the knight count K. K is never
+        printed -- Stage 2 refers to it only as "as many ... as there are
+        knights". K is forced >= 1 so the arithmetic start (and the final
+        product) is non-zero.
+      * Hop B (arithmetic): a chain seeded by K produces R.
+      * Hop C (ordering): solving the ordering yields C, the 1-indexed position
+        of a named inhabitant. The final answer is R * C.
+    A one-unit slip in ANY hop changes the gold. There is no modulo wrap to
+    mask arithmetic drift, and no stage is a labelled distractor.
+    """
     rs = _rng("composed-struct", difficulty, structure_seed)
     ru = _rng("composed-surf", structure_seed, surface_seed)
 
     # Hop A: knights & knaves (small, fixed difficulty; unique by construction).
+    # Re-roll until at least one knight, so the arithmetic start is non-zero.
     kk_diff = 2
-    kk_struct = rs.randint(0, 2 ** 16)
-    kk_prompt, kk_gold, _, _ = gen_knights(kk_diff, kk_struct, 0, False)
-    # Strip the final question line to get just the clues block.
-    kk_block = kk_prompt.rsplit("\n", 1)[0]
-    # Count knights from the unique solution.
-    kk_names, kk_stmts = _kk_parse(kk_prompt)
-    kk_sols = _kk_all_solutions(kk_names, kk_stmts)
-    knight_count = sum(1 for v in kk_sols[0].values() if v)
+    knight_count, kk_block = 0, ""
+    for _ in range(64):
+        kk_struct = rs.randint(0, 2 ** 16)
+        kk_prompt, _kk_gold, _kk_at, _kk_n = gen_knights(kk_diff, kk_struct, 0, False)
+        kk_names, kk_stmts = _kk_parse(kk_prompt)
+        knight_count = sum(1 for v in _kk_all_solutions(kk_names, kk_stmts)[0].values() if v)
+        if knight_count >= 1:
+            kk_block = kk_prompt.rsplit("\n", 1)[0]   # clues only (drop the question)
+            break
 
-    # Hop B: arithmetic seeded by the knight count.
+    # Hop B: arithmetic seeded by the UN-printed knight count.
     arith_diff = max(1, difficulty)
-    arith_struct = rs.randint(0, 2 ** 16)
     arith_name = ru.choice(NAMES)
     arith_item = ru.choice(ITEMS)
     current = knight_count
-    arith_clauses = [f"{arith_name} starts with {current} {arith_item}."]
+    arith_clauses = [f"{arith_name} starts with as many {arith_item} as there "
+                     f"are knights on the island."]
     for _ in range(arith_diff):
         op = rs.choice(["add", "sub", "mul", "div"])
         if op == "sub" and current <= 1:
@@ -741,30 +787,31 @@ def gen_composed(difficulty, structure_seed, surface_seed, distractor):
     arith_prompt = " ".join(arith_clauses)
     arith_result = current
 
-    # Hop C: ordering hop included as a distractor/red-herring. The
-    # final answer is the raw integer from Hop B (arithmetic), NOT a
-    # name lookup into the ordering. Dropping the `% len(names)` modulo
-    # is critical: any 1-unit drift in the arithmetic hop propagates
-    # to the final integer instead of being masked by wrap-around.
+    # Hop C: ordering. Solving it yields C = the 1-indexed position (from the
+    # top) of a named inhabitant; the final answer is R * C, so a slip in the
+    # ordering changes the gold (no modulo wrap to mask drift).
     order_diff = max(1, difficulty)
     order_struct = rs.randint(0, 2 ** 16)
-    order_prompt, _order_gold, _atype, names = gen_order(order_diff, order_struct, 0, False)
+    order_prompt, _order_gold, _order_at, order_names = gen_order(
+        order_diff, order_struct, 0, False)
     order_clauses = order_prompt.split(" Who is the ")[0]
-
-    # Final gold: the raw integer from Hop B (carried through all
-    # hops). Answer space is the full integer range, not a wrapped
-    # index into the ordering.
-    gold = str(arith_result)
+    sup_hi = re.search(r"Who is the \w+ (\w+)\?", order_prompt).group(1)
+    n_people = len(order_names)              # order_names[0] = top ... [-1] = bottom
+    pivot_idx = rs.randint(1, n_people - 1)  # C in 2..n_people (never identity)
+    pivot_name = order_names[pivot_idx]
+    count_c = pivot_idx + 1
+    gold = str(arith_result * count_c)
 
     prompt = (
         "Stage 1: " + kk_block + "\n"
-        f"Is {kk_names[rs.randrange(len(kk_names))]} a knight or a knave? "
-        "(Use the number of knights in the next stage.)\n\n"
+        "First work out how many knights live on the island; you need that "
+        "count for Stage 2.\n\n"
         "Stage 2: " + arith_prompt + "\n"
-        f"How many {arith_item} does {arith_name} have now? "
-        "(Use this number in the next stage.)\n\n"
-        "Stage 3 (distractor, not used for the answer): " + order_clauses + "\n"
-        "Stage 2's result is the answer. What is it?"
+        f"Let R be how many {arith_item} {arith_name} has at the end of Stage 2.\n\n"
+        "Stage 3: " + order_clauses + "\n"
+        f"Counting the {sup_hi} as position 1, what is {pivot_name}'s position "
+        "in this ordering? Call it C. Your final answer is R multiplied by C. "
+        "What is R times C?"
     )
     return prompt, gold, "int", None
 
@@ -794,8 +841,8 @@ def gen_redefined_ops(difficulty, structure_seed, surface_seed, distractor):
                              lambda a, b: a + b + bias)),
         (lambda sym, bias: (f"{sym} means multiply the two numbers then subtract {bias}",
                              lambda a, b: a * b - bias)),
-        (lambda sym, bias: (f"{sym} means add the two numbers then double",
-                             lambda a, b: (a + b) * 2)),
+        (lambda sym, bias: (f"{sym} means double the sum of the two numbers, then add {bias}",
+                             lambda a, b: (a + b) * 2 + bias)),
         # Non-commutative: subtraction from the LEFT operand (order-sensitive)
         (lambda sym, bias: (f"{sym} means subtract the right number from the left, then add {bias}",
                              lambda a, b: a - b + bias)),
@@ -842,8 +889,12 @@ def gen_redefined_ops(difficulty, structure_seed, surface_seed, distractor):
         clauses.append(f"{name} {sym} {k} {item}.")
         current = new
     if distractor:
+        # NoOp distractor in the same form as the opening clause but about a
+        # different person and with no operator symbol, so the (subject-blind)
+        # verifier's first "starts with" match stays the real subject's and no
+        # redefined op is applied to it.
         oname = rd.choice([n for n in NAMES if n != name])
-        clauses.insert(1, f"{oname} also has {rd.randint(2, 20)} pencils.")
+        clauses.insert(1, f"{oname} starts with {rd.randint(2, 20)} {item}.")
     prompt = " ".join(clauses) + f" How many {item} does {name} have now?"
     return prompt, str(current), "int", None
 
@@ -864,8 +915,9 @@ def _verify_redefined_ops(prompt, gold):
         elif "multiply the two numbers then subtract" in definition:
             bias = int(re.search(r"subtract (\d+)", definition).group(1))
             op_defs[sym] = lambda a, b, bias=bias: a * b - bias
-        elif "add the two numbers then double" in definition:
-            op_defs[sym] = lambda a, b: (a + b) * 2
+        elif "double the sum of the two numbers, then add" in definition:
+            bias = int(re.search(r"add (\d+)", definition).group(1))
+            op_defs[sym] = lambda a, b, bias=bias: (a + b) * 2 + bias
         elif "subtract the right number from the left, then add" in definition:
             bias = int(re.search(r"add (\d+)", definition).group(1))
             op_defs[sym] = lambda a, b, bias=bias: a - b + bias
@@ -941,13 +993,17 @@ def gen_unsat_csp(difficulty, structure_seed, surface_seed, distractor):
                     break
     chosen = _drop_redundant(chosen, lambda kept: len(_kk_all_solutions(slots, kept)) == 1)
 
-    # Decide: keep unique (30%), drop clue (30%), inject contradiction (30%),
-    # over-constrained but still unique (10%).
+    # Decide the class, aiming for a roughly uniform label prior over
+    # {knight, knave, UNDETERMINED, NO_SOLUTION}: ~32% drop-a-clue (most queried
+    # at a VARYING slot below -> UNDETERMINED ~25%, the rest at an invariant slot
+    # -> determinate), ~24% contradiction (NO_SOLUTION), ~44% unique/
+    # over-constrained (knight/knave). `chosen` is a minimal unique set, so
+    # dropping any clue reliably yields multiple solutions.
     r = rs.random()
-    if r < 0.3 and len(chosen) > 1:
+    if r < 0.32 and len(chosen) > 1:
         drop_idx = rs.randrange(len(chosen))
         ill_clues = chosen[:drop_idx] + chosen[drop_idx + 1:]
-    elif r < 0.6:
+    elif r < 0.56:
         # Construct a statement that's FALSE under the true types.
         contradiction = None
         for x in slots:
@@ -963,7 +1019,7 @@ def gen_unsat_csp(difficulty, structure_seed, surface_seed, distractor):
             if contradiction:
                 break
         ill_clues = chosen + [contradiction] if contradiction else chosen
-    elif r < 0.9:
+    elif r < 0.85:
         ill_clues = chosen
     else:
        # Over-constrained but still unique: add redundant clues that preserve
@@ -982,19 +1038,32 @@ def gen_unsat_csp(difficulty, structure_seed, surface_seed, distractor):
     # Compute gold from actual solution count — single source of truth.
     sols = _kk_all_solutions(slots, ill_clues)
     names = ru.sample(NAMES, n)
-    query_slot = rs.randrange(n)
+    # When several solutions remain, query a slot that VARIES across them so the
+    # dropped-clue class is genuinely UNDETERMINED instead of collapsing to a
+    # determinate knight/knave (which under-represented UNDETERMINED). With >= 2
+    # distinct solutions at least one slot must vary.
+    if len(sols) >= 2:
+        varying = [s for s in slots if len({sol[s] for sol in sols}) > 1]
+        invariant = [s for s in slots if s not in varying]
+        # Mostly query a VARYING slot (-> UNDETERMINED) so the label prior stays
+        # balanced, but ~20% of the time query an INVARIANT slot (-> determinate)
+        # to preserve the "locally determinate despite global ambiguity" probe
+        # (bench-le7.1/le7.2).
+        if varying and (not invariant or rs.random() < 0.8):
+            query_slot = rs.choice(varying)
+        elif invariant:
+            query_slot = rs.choice(invariant)
+        else:
+            query_slot = rs.randrange(n)
+    else:
+        query_slot = rs.randrange(n)
     if len(sols) == 0:
         gold = "NO_SOLUTION"
     elif len(sols) == 1:
         gold = "knight" if sols[0][query_slot] else "knave"
     else:
-        # Multiple solutions after the ill-clue: the queried slot may still be
-        # invariant, in which case the answer is determinate, not UNDETERMINED.
         values = {s[query_slot] for s in sols}
-        if len(values) == 1:
-            gold = "knight" if next(iter(values)) else "knave"
-        else:
-            gold = "UNDETERMINED"
+        gold = "UNDETERMINED" if len(values) > 1 else ("knight" if next(iter(values)) else "knave")
 
     ru.shuffle(ill_clues)
     sents = []
@@ -1138,10 +1207,9 @@ def _verify_arithmetic(prompt, gold):
 def _verify_state(prompt, gold):
     state = {}
     for s in _sentences(prompt):
-        if s.startswith("A nearby"):                   # distractor clause
-            continue
         m = re.match(r"(.+?) has (\d+) ", s)
         if m and " are " not in s:
+            # An untracked distractor container is parsed but never queried.
             state[m.group(1).lower()] = int(m.group(2))
     for s in _sentences(prompt):
         if (m := re.match(r"(\d+) \S+ are added to (.+?)\.", s)):
@@ -1206,83 +1274,65 @@ def _verify_order(prompt, gold):
     return rank < len(order) and order[rank] == gold
 
 
-def _detect_next(t):
-    """Infer the next term from the sequence alone, trying simplest rules first."""
-    n = len(t)
-    if n >= 3:
-        d = [t[i + 1] - t[i] for i in range(n - 1)]
-        if len(set(d)) == 1:
-            return t[-1] + d[0]                                          # arithmetic
-        if all(t[i] != 0 for i in range(n - 1)):
-            r = t[1] // t[0] if t[0] else 0
-            if r and all(t[i + 1] == t[i] * r for i in range(n - 1)):
-                return t[-1] * r                                         # geometric
-        dd = [d[i + 1] - d[i] for i in range(len(d) - 1)]
-        if len(set(dd)) == 1:
-            return t[-1] + d[-1] + dd[0]                                 # quadratic
-        ddd = [dd[i + 1] - dd[i] for i in range(len(dd) - 1)]
-        if len(ddd) >= 2 and len(set(ddd)) == 1:                         # cubic
-            new_dd = dd[-1] + ddd[-1]
-            return t[-1] + (d[-1] + new_dd)
-        if all(t[i] == t[i - 1] + t[i - 2] for i in range(2, n)):
-            return t[-1] + t[-2]                                         # fibonacci-like
-    even, odd = t[0::2], t[1::2]
-    if len(even) >= 2 and len(odd) >= 2:
-        de = {even[i + 1] - even[i] for i in range(len(even) - 1)}
-        do = {odd[i + 1] - odd[i] for i in range(len(odd) - 1)}
-        if len(de) == 1 and len(do) == 1:                               # interleaved two APs
-            return even[-1] + de.pop() if n % 2 == 0 else odd[-1] + do.pop()
-    return None
-
-
 def _verify_sequence(prompt, gold):
-    """Independent verifier using finite differences + ambiguity check.
-    Does NOT reuse _detect_next to avoid sharing the generator's rule ladder."""
+    """Independent verifier: predict the next term from the simplest fitting
+    rule and REJECT genuinely ambiguous sequences.
+
+    It collects a candidate next-term from every independent rule that fully
+    fits the observed terms -- lowest-degree polynomial (finite differences),
+    geometric, fibonacci-like, and interleaved two-APs. If more than one
+    *distinct* next-term is predicted, the sequence is ambiguous and rejected
+    (this is what the README's "unique next term" guarantee requires, and what
+    the old hollow `pass` gate never enforced). Shares no rule ladder with the
+    generator.
+    """
     m = re.search(r"Sequence:\s*(.+?),\s*\.\.\.", prompt)
     if not m:
         return False
     terms = [int(x) for x in re.findall(r"-?\d+", m.group(1))]
-    if len(terms) < 3:
+    if len(terms) < 4:                       # too few terms to pin any rule
         return False
-    # Try finite differences: if k-th differences are constant, it's a degree-k polynomial.
-    seq = terms[:]
-    diffs = [seq]
-    for _ in range(len(seq) - 1):
-        d = [diffs[-1][i + 1] - diffs[-1][i] for i in range(len(diffs[-1]) - 1)]
-        diffs.append(d)
-        if len(d) == 0:
-            break
-    # Find the shallowest constant-difference level.
+
+    candidates = set()
+
+    # (1) Lowest-degree polynomial via finite differences. Require the constant
+    # level to be confirmed by >= 3 differences: a high-degree fit "confirmed"
+    # by only 2 equal differences is a coincidence (e.g. an interleaved sequence
+    # whose 6th differences happen to repeat), not a real polynomial. Every
+    # generator polynomial (AP/quadratic/cubic) has >= 4 confirming differences.
+    diffs = [terms[:]]
+    while len(diffs[-1]) > 1:
+        prev = diffs[-1]
+        diffs.append([prev[i + 1] - prev[i] for i in range(len(prev) - 1)])
     for deg, d in enumerate(diffs):
-        if len(d) >= 2 and len(set(d)) == 1:
-            # degree-deg polynomial; next term = sum of last elements of each diff level
-            pred = sum(dd[-1] for dd in diffs[:deg + 1])
-            # Check ambiguity: is a lower-degree fit also possible?
-            if deg >= 2:
-                # A quadratic fit on the last 3 terms also works for cubics — flag if ambiguous
-                lower = diffs[deg - 1]
-                if len(lower) >= 2 and len(set(lower)) == 1:
-                    # Lower degree also predicts — ambiguous
-                    pass  # accept the higher-degree fit (generator chose it)
-            return str(pred) == str(gold)
-    # Try geometric: ratios constant
-    if all(t != 0 for t in terms):
-        ratios = [terms[i + 1] / terms[i] for i in range(len(terms) - 1)]
-        if all(abs(r - ratios[0]) < 1e-9 for r in ratios):
-            pred = terms[-1] * ratios[0]
-            return str(int(pred)) == str(gold)
-    # Try fibonacci-like: each term = sum of two preceding
+        if len(d) >= 3 and len(set(d)) == 1:
+            candidates.add(sum(level[-1] for level in diffs[:deg + 1]))
+            break
+
+    # (2) Geometric: constant integer ratio.
+    if all(t != 0 for t in terms) and terms[1] % terms[0] == 0:
+        r0 = terms[1] // terms[0]
+        if r0 not in (0, 1) and all(terms[i + 1] == terms[i] * r0
+                                    for i in range(len(terms) - 1)):
+            candidates.add(terms[-1] * r0)
+
+    # (3) Fibonacci-like: each term is the sum of the two preceding.
     if all(terms[i] == terms[i - 1] + terms[i - 2] for i in range(2, len(terms))):
-        return str(terms[-1] + terms[-2]) == str(gold)
-    # Try interleaved APs
+        candidates.add(terms[-1] + terms[-2])
+
+    # (4) Interleaved two APs: even- and odd-index subsequences are each APs.
     even, odd = terms[0::2], terms[1::2]
     if len(even) >= 2 and len(odd) >= 2:
         de = {even[i + 1] - even[i] for i in range(len(even) - 1)}
         do = {odd[i + 1] - odd[i] for i in range(len(odd) - 1)}
         if len(de) == 1 and len(do) == 1:
-            pred = even[-1] + de.pop() if len(terms) % 2 == 0 else odd[-1] + do.pop()
-            return str(pred) == str(gold)
-    return False
+            de0, do0 = next(iter(de)), next(iter(do))
+            candidates.add(even[-1] + de0 if len(terms) % 2 == 0 else odd[-1] + do0)
+
+    # Unambiguous iff exactly one distinct prediction, and it matches the gold.
+    if len(candidates) != 1:
+        return False
+    return str(candidates.pop()) == str(gold)
 
 
 def _verify_retroactive_edit(prompt, gold):
@@ -1296,18 +1346,14 @@ def _verify_retroactive_edit(prompt, gold):
     factor = int(edit_m.group(2))
     item = edit_m.group(3)
     for s in _sentences(prompt):
-        if s.startswith("A nearby"):
-            continue
         m = re.match(r"(.+?) has (\d+) " + re.escape(item) + r"\.", s)
         if m and " are " not in s:
             name = m.group(1).lower().strip()
             amount = int(m.group(2))
             if name == edit_name:
                 amount *= factor
-            state[name] = amount
+            state[name] = amount             # an untracked distractor container is never queried
     for s in _sentences(prompt):
-        if s.startswith("A nearby"):
-            continue
         if (m := re.match(r"(\d+) " + re.escape(item) + r" are added to (.+?)\.", s)):
             state[m.group(2).lower().strip()] = state.get(m.group(2).lower().strip(), 0) + int(m.group(1))
         elif (m := re.match(r"(\d+) " + re.escape(item) + r" are removed from (.+?)\.", s)):

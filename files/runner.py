@@ -362,7 +362,6 @@ def _process(item, cfg):
             item["choices"].split("|") if item.get("choices") else None)
         rows.append((text, parsed, correct, conf, latency, ptok, ctok, parse_source))
     return item["item_id"], rows, telemetry_list, (str(last_err) if last_err else None)
-    return item["item_id"], rows, (str(last_err) if last_err else None)
 
 
 

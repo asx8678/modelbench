@@ -45,12 +45,44 @@ def test_all_generated_golds_verify():
     assert ds and all(generators.verify_gold(p) for p in ds)
 
 
+@pytest.mark.parametrize("family", sorted(generators.SUPPORTS_DISTRACTOR))
+def test_distractor_is_noop_without_stock_phrase(family):
+    # bench-9bt: the distractor must (a) be a true NoOp -- the gold is identical
+    # to the matched base item -- and (b) carry no fixed stock phrase that lets a
+    # model (or the verifier) skip it without tracking relevance.
+    stock = ("A nearby", "in a basket", "also has")
+    changed = False
+    for diff in range(1, 7):
+        for seed in range(40):
+            base = generators._mk(family, diff, seed, 0, False, "base", "g")
+            dist = generators._mk(family, diff, seed, 0, True, "distractor", "g")
+            assert generators.verify_gold(dist) is True
+            assert base.gold == dist.gold                     # NoOp: gold preserved
+            if dist.prompt != base.prompt:
+                changed = True
+                assert not any(s in dist.prompt for s in stock), dist.prompt
+    assert changed                                            # the probe actually injects a clause
+
+
 def test_sequences_capped_at_tier_6():
     # tier 6 (cubic) is the hardest rule; asking for more must not silently reuse it
     ds = generators.build_dataset(["sequences"], 1, 9, 3, verify=True)
     assert max(p.difficulty for p in ds) == 6
     cubics = [p for p in ds if p.difficulty == 6]
     assert cubics and all(generators.verify_gold(p) for p in cubics)
+
+
+def test_sequence_verifier_flags_ambiguous():
+    # bench-kab: the ambiguity gate must REJECT a sequence that two simple rules
+    # fit but disagree on. [3,6,12,24] is geometric (->48) OR two interleaved APs
+    # ([3,12]+9, [6,24]+18 -> 21); with only 4 terms it is genuinely ambiguous,
+    # so the verifier rejects EITHER candidate as the gold.
+    amb = "Sequence: 3, 6, 12, 24, ...  What is the next number?"
+    assert generators._verify_sequence(amb, "48") is False
+    assert generators._verify_sequence(amb, "21") is False
+    # The same rule with enough terms (6, as the generator emits) is unambiguous.
+    clean = "Sequence: 3, 6, 12, 24, 48, 96, ...  What is the next number?"
+    assert generators._verify_sequence(clean, "192") is True
 
 
 @pytest.mark.parametrize("family", list(generators.GENERATORS))
@@ -118,18 +150,33 @@ def test_logic_grid_is_uniquely_solvable_and_scales():
         sols = generators._lg_solutions(names, n, clues)
         assert len(sols) == 1
         assert str(sols[0][q]) == p.gold
+def _first_invariant_slot_unsat_csp(max_seed=400):
+    """Find a dropped-clue unsat_csp item whose queried slot is invariant across
+    the multiple solutions (determinate despite global ambiguity). Returns
+    (prompt, gold, values) or None. Scans seeds so it survives generator-prior
+    changes (bench-5zn) rather than hard-coding one seed."""
+    for seed in range(max_seed):
+        prompt, gold, _atype, _choices = generators.gen_unsat_csp(2, seed, 0, False)
+        names, stmts = generators._kk_parse(prompt)
+        sols = generators._kk_all_solutions(names, stmts)
+        if len(sols) <= 1:
+            continue
+        query_name = re.search(r"Is (\w+) a knight or a knave\?", prompt).group(1)
+        values = {s.get(query_name) for s in sols}
+        if len(values) == 1:
+            return prompt, gold, values
+    return None
+
+
 def test_unsat_csp_dropped_clue_with_invariant_queried_slot_is_determinate():
     # bench-le7.1 regression: when a clue is dropped and the puzzle becomes
     # under-constrained, the queried slot may still be invariant across all
     # remaining solutions. The gold must be the determinate knight/knave, not
-    # the generic UNDETERMINED sentinel.
-    prompt, gold, _atype, choices = generators.gen_unsat_csp(2, 4, 0, False)
-    names, stmts = generators._kk_parse(prompt)
-    sols = generators._kk_all_solutions(names, stmts)
-    assert len(sols) > 1, "expected an under-constrained (dropped-clue) item"
-    query_name = __import__('re').search(r"Is (\w+) a knight or a knave\?", prompt).group(1)
-    values = {s.get(query_name) for s in sols}
-    assert len(values) == 1, "this seed's queried slot should be invariant"
+    # the generic UNDETERMINED sentinel. bench-5zn keeps ~20% of the dropped-clue
+    # class querying an invariant slot precisely to preserve this probe.
+    found = _first_invariant_slot_unsat_csp()
+    assert found is not None, "no dropped-clue item with an invariant queried slot found"
+    _prompt, gold, values = found
     assert gold in ("knight", "knave"), gold
     assert gold == ("knight" if next(iter(values)) else "knave")
 
@@ -138,7 +185,9 @@ def test_unsat_csp_verifier_rejects_undetermined_on_invariant_slot():
     # bench-le7.2 regression: the verifier must independently check the set of
     # values for the queried slot, not blindly accept UNDETERMINED whenever there
     # are multiple solutions.
-    prompt, gold, _atype, choices = generators.gen_unsat_csp(2, 4, 0, False)
+    found = _first_invariant_slot_unsat_csp()
+    assert found is not None, "no dropped-clue item with an invariant queried slot found"
+    prompt, gold, _values = found
     assert generators._verify_unsat_csp(prompt, gold) is True
     assert generators._verify_unsat_csp(prompt, "UNDETERMINED") is False
 
@@ -155,6 +204,23 @@ def test_unsat_csp_over_constrained_branch_is_determinate():
         values = {s.get(query_name) for s in sols}
         assert len(values) == 1
         assert gold == ("knight" if next(iter(values)) else "knave")
+
+
+def test_unsat_csp_label_prior_is_roughly_balanced():
+    # bench-5zn: rebalance the four-way label prior so UNDETERMINED is not
+    # severely under-represented (it was ~17%; querying a varying slot on the
+    # dropped-clue class lifts it toward ~25%).
+    from collections import Counter
+    labels = Counter()
+    for diff in range(1, 6):
+        for seed in range(120):
+            p = generators._mk("unsat_csp", diff, seed, 0, False, "base", "g")
+            labels[p.gold] += 1
+    tot = sum(labels.values())
+    for lab in ("knight", "knave", "UNDETERMINED", "NO_SOLUTION"):
+        frac = labels[lab] / tot
+        assert 0.15 < frac < 0.35, f"{lab} prior {frac:.2%} is too skewed"
+    assert labels["UNDETERMINED"] / tot > 0.20    # the previously-rare class
 
 
 def test_csp_puzzles_are_minimally_constrained():
@@ -224,23 +290,27 @@ def test_no_degenerate_constant_gold(family, diff):
 
 
 def test_composed_gold_verifies_end_to_end():
-    # The composed chain (knights -> arithmetic -> ordering) must produce a gold that
-    # the independent verifier re-derives from the prompt text.
+    # The composed chain (knights -> arithmetic -> ordering) must produce a gold
+    # that the independent verifier re-derives from the prompt text.
     p = generators._mk("composed", 3, 7, 0, False, "base", "g")
     assert generators.verify_gold(p) is True
-    # Sanity: prompt has all three stages and >=3 dependency hops.
-    assert "Stage 1:" in p.prompt and "Stage 2:" in p.prompt and "Stage 3" in p.prompt
-    # Gold is the raw integer from the arithmetic hop; the ordering hop
-    # is now a distractor, so the answer space is the integer range
-    # (no modulo wrap into Stage 3 names).
+    # Sanity: prompt has all three (load-bearing) stages.
+    assert "Stage 1:" in p.prompt and "Stage 2:" in p.prompt and "Stage 3:" in p.prompt
+    # The final answer is R * C (arithmetic result times an ordering position),
+    # an unbounded integer >= 2 (K is forced >= 1, C >= 2).
     assert p.answer_type == "int"
-    assert int(p.gold) >= 0
+    assert int(p.gold) >= 2
+    # bench-o6o: the knight count must be DEDUCED, never printed, and no stage
+    # is a labelled distractor (both were exploitable shortcuts before).
+    assert "starts with as many" in p.prompt
+    assert re.search(r"starts with \d", p.prompt) is None
+    assert "distractor" not in p.prompt.lower()
 
 
 def test_composed_perturb_hop_a_changes_final_gold():
-    # Perturbing the first hop (knights count) must propagate and change
-    # the final gold. Gold is now the raw integer from Stage 2; a
-    # different knight count yields a different integer (no wrap).
+    # Perturbing the first hop (knights count) must propagate through the
+    # arithmetic hop and change the final gold (R * C, with C fixed): a
+    # different knight count yields a different R, hence a different product.
     p = generators._mk("composed", 3, 7, 0, False, "base", "g")
     parsed = generators._composed_parse_hops(p.prompt)
     names, stmts = generators._kk_parse(parsed["knights_prompt"])
@@ -275,9 +345,33 @@ def test_composed_perturb_hop_a_changes_final_gold():
                 new_knight_count = sum(1 for v in sols_i[0].values() if v)
                 if new_knight_count != sum(1 for v in generators._kk_all_solutions(names, stmts)[0].values() if v):
                     break
-    arith_total = generators._verify_arithmetic_raw(parsed["arith_prompt"], new_knight_count)
-    # Gold is the raw integer; any 1-unit knight-count change propagates.
-    assert int(arith_total) != int(p.gold), (p.gold, arith_total)
+    old_knight_count = sum(1 for v in generators._kk_all_solutions(names, stmts)[0].values() if v)
+    r_old = generators._verify_arithmetic_raw(parsed["arith_prompt"], old_knight_count)
+    r_new = generators._verify_arithmetic_raw(parsed["arith_prompt"], new_knight_count)
+    # A 1-unit knight-count change propagates through the arithmetic hop, so the
+    # final gold (R * C, C fixed) changes too.
+    assert r_old is not None and r_new is not None
+    assert int(r_new) != int(r_old), (r_old, r_new)
+
+
+def test_composed_hop_c_is_load_bearing():
+    # bench-o6o: the ordering hop (Stage 3) genuinely contributes. The gold is
+    # R * C where C is the re-derived 1-indexed position of the named pivot, so
+    # a different ordering outcome (different C) changes the answer -- Stage 3
+    # cannot be skipped.
+    p = generators._mk("composed", 4, 11, 0, False, "base", "g")
+    assert generators.verify_gold(p) is True
+    parsed = generators._composed_parse_hops(p.prompt)
+    order, _ = generators._verify_order_raw(parsed["order_block"], "")
+    assert order is not None and parsed["pivot"] in order
+    c = order.index(parsed["pivot"]) + 1
+    assert c >= 2                                    # multiply is never identity
+    kk_names, kk_stmts = generators._kk_parse(parsed["knights_prompt"])
+    k = sum(1 for v in generators._kk_all_solutions(kk_names, kk_stmts)[0].values() if v)
+    r = generators._verify_arithmetic_raw(parsed["arith_prompt"], k)
+    assert r is not None and r >= 1
+    assert int(p.gold) == r * c                      # gold is a function of C
+    assert r * (c - 1) != int(p.gold)                # changing C by 1 changes it
 
 
 # ------------------------------------------------------------------ grading (#1)
@@ -652,3 +746,15 @@ def test_retroactive_edit_changes_gold_vs_unedited():
     assert "Actually," in p.prompt
     # A corrupted gold must fail verification.
     assert not generators.verify_gold(dataclasses.replace(p, gold=str(int(p.gold) + 1)))
+
+
+def test_retroactive_edit_factor_is_load_bearing():
+    # bench-5zn: the queried container is the EDITED one, so the retroactive
+    # factor always affects the answer -- re-deriving with the factor changed by
+    # 1 must change the gold (the "Actually..." pivot is never a no-op).
+    for seed in (7, 19, 23):
+        p = generators._mk("retroactive_edit", 3, seed, 0, False, "base", "g")
+        m = re.search(r"(held )(\d+)( times as many)", p.prompt)
+        assert m, "expected an 'Actually... N times as many' edit clause"
+        perturbed = p.prompt[:m.start(2)] + str(int(m.group(2)) + 1) + p.prompt[m.end(2):]
+        assert generators._verify_retroactive_edit(perturbed, p.gold) is False

@@ -21,7 +21,7 @@ that actually distinguish reasoning from pattern-matching:
 | **Grading fragility** | How often does the `ANSWER:` marker parse disagree with the fallback parse? | High fragility means the score depends on format compliance, not just reasoning. |
 | **Behavioral uncertainty** | Disagreement entropy and self-consistency gap across samples | Low stated confidence but high sample disagreement flags uncertainty the model doesn't report. |
 
-Thirteen problem families:
+Eleven problem families:
 
 | Family | What it probes | Difficulty axis |
 |---|---|---|

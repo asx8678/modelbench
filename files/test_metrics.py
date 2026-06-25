@@ -30,27 +30,30 @@ def test_acc_above_chance_is_at_most_accuracy():
         assert res["acc_above_chance"][fam] <= acc + 1e-9
 
 
-def test_chance_baseline_values_for_known_families():
-    # ordering: choice over (difficulty+2) ranks
-    assert metrics._chance_baseline("ordering", 3) == pytest.approx(1.0 / 5)
-    # knights_knaves: set answer over 2^n assignments (n = difficulty+2)
-    assert metrics._chance_baseline("knights_knaves", 3) == pytest.approx(1.0 / 32)
-    # composed: choice over (difficulty+2) names
-    assert metrics._chance_baseline("composed", 3) == pytest.approx(1.0 / 5)
-    # unsat_csp: 4-way determinate choice
-    assert metrics._chance_baseline("unsat_csp", 3) == pytest.approx(0.25)
-    # logic_grid: choice over (difficulty+2) ranks
-    assert metrics._chance_baseline("logic_grid", 5) == pytest.approx(1.0 / 7)
+def test_chance_baseline_is_empirical_best_constant_guess():
+    # Unbounded-integer families have no winning constant guess -> chance 0,
+    # even when golds repeat (composed is unbounded; logic_grid is NOT).
+    assert metrics._family_chance("arithmetic", ["3", "3", "3"]) == 0.0
+    assert metrics._family_chance("composed", ["6", "51", "12"]) == 0.0
+    # Bounded families use the empirical modal-answer frequency.
+    assert metrics._modal_frequency(["a", "a", "b"]) == pytest.approx(2 / 3)
+    assert metrics._modal_frequency([]) == 0.0
+    assert metrics._family_chance(
+        "unsat_csp", ["knight", "knight", "knave", "UNDETERMINED"]) == pytest.approx(0.5)
+    # logic_grid's gold is a bounded integer (a floor), so it is scored
+    # empirically too -- the bug bench-r6u fixes is treating it as unbounded.
+    assert metrics._family_chance("logic_grid", ["1", "2", "1", "3"]) == pytest.approx(0.5)
 
 
 def test_chance_correction_recompute_no_model_calls():
-    # yvr.2: build a dataset (no model calls), fill all responses with the
-    # true gold so acc == 1, and assert acc_above_chance is well-defined
-    # and bounded. Also assert the per-family chance values match the
-    # documented baseline formula.
+    # yvr.2 / bench-r6u: build a dataset (no model calls), fill all responses
+    # with the true gold so acc == 1, and assert acc_above_chance is
+    # well-defined and bounded. Chance is the empirical best-constant-guess
+    # (modal-answer frequency) for bounded families, and 0 for unbounded-int
+    # families (composed is now an unbounded int -> 0, not 1/(d+2)).
     families = ["ordering", "knights_knaves", "logic_grid", "unsat_csp",
                 "composed", "arithmetic", "state_tracking"]
-    con, items = _dataset(families, 1, 4, 1)
+    con, items = _dataset(families, 2, 4, 2)
     for p in items:
         _store(con, "r", p.item_id, 0, f"ANSWER: {p.gold}", p.gold, 1)
     res = metrics.compute(con, "r")
@@ -59,19 +62,14 @@ def test_chance_correction_recompute_no_model_calls():
         if acc is None:
             continue
         assert res["acc_above_chance"][fam] <= acc + 1e-9
-    # Chance baselines match the documented formula.
+    int_families = {"composed", "arithmetic", "state_tracking"}
     for fam, baseline in res["chance_baseline"].items():
-        if fam == "knights_knaves":
-            # Set answer over 2^n assignments; chance averaged across
-            # difficulties is bounded by 1/2^(min_diff+2).
-            assert 0.0 < baseline <= 0.5
-        elif fam in ("ordering", "logic_grid", "composed"):
-            # Averaged across difficulties 1..4: 1/(d+2) for d in 1..4
-            assert 0.15 < baseline < 0.4
-        elif fam == "unsat_csp":
-            assert baseline == pytest.approx(0.25)
-        else:
+        if fam in int_families:
+            # Unbounded integer answer -> no winning constant guess.
             assert baseline == 0.0
+        else:
+            # Bounded (choice/set) family -> a real modal-answer frequency.
+            assert 0.0 < baseline <= 1.0
 
 
 

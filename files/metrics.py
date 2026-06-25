@@ -49,22 +49,42 @@ def _is_correct(parsed, gold, answer_type):
     return str(parsed).lower() == str(gold).lower()
 
 
-def _chance_baseline(family, difficulty):
-    if family == "ordering":
-        return 1.0 / (difficulty + 2)
-    if family == "composed":
-        return 1.0 / (difficulty + 2)
-    if family == "unsat_csp":
-        return 0.25
-    if family == "knights_knaves":
-        return 1.0 / (2 ** (difficulty + 2))
-    if family == "logic_grid":
-        return 1.0 / (difficulty + 2)
-    if family in ("arithmetic", "state_tracking", "sequences"):
+def _modal_frequency(golds):
+    """Best constant-guess accuracy: the frequency of the most common answer.
+
+    This is the honest 'chance' floor for a family with a bounded answer
+    space -- the score a model gets by always guessing the single most likely
+    label without doing any reasoning. It captures skew in the realized answer
+    distribution that a flat 1/k baseline misses.
+    """
+    if not golds:
         return 0.0
-    if family in ("retroactive_edit", "multi_turn_inject"):
+    counts = Counter(golds)
+    return counts.most_common(1)[0][1] / len(golds)
+
+
+# Families whose answer is an UNBOUNDED integer: no constant guess can win, so
+# their chance baseline is ~0. Everything else has a bounded answer space and is
+# scored empirically -- including logic_grid, whose gold is an int (a floor) but
+# bounded to 1..n, so it must NOT be lumped in here.
+_UNBOUNDED_INT_FAMILIES = frozenset({
+    "arithmetic", "state_tracking", "sequences", "composed",
+    "retroactive_edit", "multi_turn_inject",
+})
+
+
+def _family_chance(family, golds):
+    """Per-family chance baseline from the realized gold distribution.
+
+    Unbounded-integer families have no winning constant guess, so chance ~ 0.
+    Bounded families (ordering, knights_knaves, unsat_csp, and the bounded-int
+    logic_grid) use the empirical modal-answer frequency, which reflects skew in
+    the answer prior (e.g. unsat_csp's label distribution or logic_grid's
+    low-floor bias) that a flat 1/k or 1/2^n value understates.
+    """
+    if family in _UNBOUNDED_INT_FAMILIES:
         return 0.0
-    return 0.0
+    return _modal_frequency(golds)
 
 
 # ---- helpers for re-parsing raw responses (marker vs fallback)
@@ -302,17 +322,19 @@ def compute(con, run_id):
     }
 
 
-    # ---- chance-corrected accuracy per family
+    # ---- chance-corrected accuracy per family (empirical best-constant-guess)
     chance_baseline = {}
     acc_above_chance = {}
-    for fam, vals in by_fam.items():
-        chances = [_chance_baseline(meta[i]["family"], meta[i]["difficulty"])
-                   for i in base
-                   if meta[i]["family"] == fam and i in s0_correct]
-        chance = float(np.mean(chances)) if chances else 0.0
+    for fam in by_fam:
+        golds = [meta[i]["gold"] for i in base
+                 if meta[i]["family"] == fam and i in s0_correct]
+        chance = _family_chance(fam, golds)
         chance_baseline[fam] = chance
         acc = fam_acc[fam]
-        acc_above_chance[fam] = float((acc - chance) / (1.0 - chance)) if chance > 0 else acc
+        if 0.0 < chance < 1.0:
+            acc_above_chance[fam] = float((acc - chance) / (1.0 - chance))
+        else:
+            acc_above_chance[fam] = acc
 
     frontier_headroom = None
     if passk is not None:
