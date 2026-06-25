@@ -77,9 +77,11 @@ def parse_answer(text: str, answer_type: str, choices: Optional[List[str]] = Non
                 # an un-recognized marker value should not fall back unless strict off
                 pass
         elif answer_type == "set":
-            tokens = _split_set(marker)
-            if tokens:
-                parsed = ",".join(sorted(tokens))
+            # A present marker is authoritative for set answers: the reasoning text
+            # is saturated with names, and an empty token list is the explicit empty
+            # set ('none', the all-knight puzzle) -- not a parse miss. So always take
+            # the marker (possibly "") and never fall through to a full-text scan.
+            parsed = ",".join(sorted(_split_set(marker)))
         else:
             parsed = marker
         if parsed is not None:
@@ -149,12 +151,10 @@ def _split_set(text: str) -> List[str]:
     out = []
     for tok in raw:
         t = tok.strip().strip("'\".").lower()
-        if not t or t in {"none", "no", "nothing", "n/a", "knight,knave,knight"}:
-            # the last guard prevents the marker being mis-parsed as a list
-            # if the model happened to echo the gold format with no list.
-            if t in {"none", "no", "nothing", "n/a"}:
-                return []                       # explicit empty
+        if not t:
             continue
+        if t in {"none", "no", "nothing", "n/a"}:
+            return []                           # explicit empty list (all-knight puzzle)
         out.append(t)
     return out
 

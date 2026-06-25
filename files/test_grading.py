@@ -115,6 +115,22 @@ def test_parse_answer_returns_tuple():
     assert src == "none"
 
 
+def test_set_answer_grading_and_split():
+    # bench-2am / E5: 'set' answers (knights_knaves knave list) compare
+    # order-insensitively; 'none' is an explicit empty set. The old overfit
+    # 'knight,knave,knight' guard token is gone and must not be needed.
+    from grading import _split_set
+    assert set(_split_set("Maria, Tomás")) == {"maria", "tomás"}
+    assert set(_split_set("Maria and Tomás")) == {"maria", "tomás"}
+    assert _split_set("none") == []
+    assert _split_set("") == []
+    # full grade(): order-insensitive set equality
+    _, ok, _, _ = grade("ANSWER: Tomás, Maria", "set", "Maria, Tomás")
+    assert ok
+    _, ok, _, _ = grade("ANSWER: none", "set", "")
+    assert ok
+
+
 def test_marker_takes_first_int_fallback_takes_last_int():
     # bench-lzl / E4: the marker/fallback int asymmetry is deliberate and documented.
     # A marker LEADS with the answer (first int); free prose CONCLUDES with it (last int).
