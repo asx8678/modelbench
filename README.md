@@ -75,6 +75,7 @@ apply:
 | `unsat_csp` | premise-flaw detection: controlled ill-posed knights-and-knaves puzzles | n (diff+2); brute-forced solution count |
 | `composed` | ≥3 execution-dependency hops (e.g. knights → arithmetic → ordering) | chain length / per-hop difficulty |
 | `redefined_ops` | arithmetic with counterfactually redefined operators | number of operations |
+| `dynamic_pivot` | **genuine backtracking**: turn 1 commits a count, turn 2 reveals the moves never happened, forcing a revision | number of updates before the pivot |
 
 - **Numeric robustness probes** (`arithmetic`, `state_tracking`, `ordering`,
   `sequences`) measure compositional and perturbation-resilient reasoning — not just

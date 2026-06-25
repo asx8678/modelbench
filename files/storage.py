@@ -15,7 +15,8 @@ CREATE TABLE IF NOT EXISTS dataset (
     family TEXT, difficulty INTEGER,
     structure_seed INTEGER, surface_seed INTEGER,
     has_distractor INTEGER, probe TEXT, grp TEXT,
-    answer_type TEXT, gold TEXT, choices TEXT, prompt TEXT, turns TEXT
+    answer_type TEXT, gold TEXT, choices TEXT, prompt TEXT, turns TEXT,
+    subgold TEXT
 );
 CREATE TABLE IF NOT EXISTS runs (
     run_id TEXT PRIMARY KEY,
@@ -56,9 +57,9 @@ def save_dataset(con, items: List[Problem]):
     con.executemany(
         """INSERT OR REPLACE INTO dataset
            (item_id, family, difficulty, structure_seed, surface_seed,
-            has_distractor, probe, grp, answer_type, gold, choices, prompt, turns)
+            has_distractor, probe, grp, answer_type, gold, choices, prompt, turns, subgold)
            VALUES (:item_id,:family,:difficulty,:structure_seed,:surface_seed,
-                   :has_distractor,:probe,:grp,:answer_type,:gold,:choices,:prompt,:turns)""",
+                   :has_distractor,:probe,:grp,:answer_type,:gold,:choices,:prompt,:turns,:subgold)""",
         [p.row() for p in items],
     )
     con.commit()

@@ -50,7 +50,7 @@ def _provider_has_capability(cfg, name):
 
 
 
-def build_messages(item, ask_confidence: bool):
+def _format_instructions(item, ask_confidence: bool) -> str:
     fmt = ("Show your reasoning, then end with a line in exactly this format:\n"
            "ANSWER: <your final answer>")
     if item["answer_type"] == "choice" and item.get("choices"):
@@ -58,6 +58,11 @@ def build_messages(item, ask_confidence: bool):
         fmt += f"\nYour answer must be exactly one of: {opts}."
     if ask_confidence:
         fmt += "\nThen on the next line:\nCONFIDENCE: <an integer 0-100 for how certain you are>"
+    return fmt
+
+
+def build_messages(item, ask_confidence: bool):
+    fmt = _format_instructions(item, ask_confidence)
 
     system_msg = {"role": "system", "content": SYSTEM}
     turns = item.get("turns")
@@ -231,10 +236,8 @@ def _mock_seed(item_id, sample_idx):
     return int(hashlib.sha1(f"{item_id}|{sample_idx}".encode()).hexdigest(), 16) % (2 ** 32)
 
 
-def mock_one(item, sample_idx, mode):
-    """One deterministic synthetic answer. 'noisy' degrades with difficulty/distractor."""
-    rnd = random.Random(_mock_seed(item["item_id"], sample_idx))
-    gold = item["gold"]
+def _mock_text(item, target, rnd, mode):
+    """Synthetic answer text aiming at `target`. 'noisy' degrades with difficulty."""
     if mode == "perfect":
         ok = True
     elif mode == "random":
@@ -243,44 +246,123 @@ def mock_one(item, sample_idx, mode):
         p = max(0.05, 0.95 - 0.11 * item["difficulty"] - (0.18 if item["has_distractor"] else 0))
         ok = rnd.random() < p
     if ok:
-        ans = gold
+        ans = target
     elif item["answer_type"] == "int":
-        ans = str(int(gold) + rnd.choice([-3, -2, -1, 1, 2, 3]))
+        ans = str(int(target) + rnd.choice([-3, -2, -1, 1, 2, 3]))
     else:
         opts = item["choices"].split("|")
-        ans = rnd.choice([o for o in opts if o != gold] or [gold])
+        ans = rnd.choice([o for o in opts if o != target] or [target])
     conf = rnd.randint(55, 95) if ok else rnd.randint(30, 80)
-    return f"Reasoning omitted in mock.\nANSWER: {ans}\nCONFIDENCE: {conf}", None, None
+    return f"Reasoning omitted in mock.\nANSWER: {ans}\nCONFIDENCE: {conf}"
+
+
+def mock_one(item, sample_idx, mode):
+    """One deterministic synthetic answer. 'noisy' degrades with difficulty/distractor."""
+    rnd = random.Random(_mock_seed(item["item_id"], sample_idx))
+    return _mock_text(item, item["gold"], rnd, mode), None, None
+
+
+def mock_turn(item, sample_idx, turn_idx, mode):
+    """Synthetic per-turn answer: turn 0 of a sequential item targets the committed
+    subgold; later turns target the final gold."""
+    target = item["subgold"] if (turn_idx == 0 and item.get("subgold")) else item["gold"]
+    rnd = random.Random(_mock_seed(item["item_id"], sample_idx * 100 + turn_idx + 1))
+    return _mock_text(item, target, rnd, mode)
+
+
+def _turns_of(item):
+    turns = item.get("turns")
+    if isinstance(turns, str):
+        return turns.split("|") if turns else []
+    return turns or []
+
+
+def _sequential_messages(item, replies, ask_confidence):
+    """Messages for the NEXT turn (index len(replies)). The real prior assistant
+    replies are in place, so each turn is answered before the next is revealed --
+    the model commits turn 1 without seeing the turn-2 pivot (E3/H3)."""
+    turns = _turns_of(item)
+    fmt = _format_instructions(item, ask_confidence)
+    msgs = [{"role": "system", "content": SYSTEM}]
+    for idx in range(len(replies) + 1):
+        msgs.append({"role": "user", "content": f"{turns[idx]}\n\n{fmt}"})
+        if idx < len(replies):
+            msgs.append({"role": "assistant", "content": replies[idx]})
+    return msgs
+
+
+def _call_turn(messages, item, cfg, sample_idx, turn_idx):
+    """One model call for a single turn. Returns (text, ptok, ctok, telemetry)."""
+    if cfg.get("mock"):
+        return mock_turn(item, sample_idx, turn_idx, cfg["mock"]), None, None, None
+    if _provider_has_capability(cfg, "native_anthropic"):
+        text, pt, ct, timings, think = call_anthropic(
+            cfg["api_key"], cfg["model"], messages,
+            cfg["temperature"], cfg["max_tokens"], cfg["timeout"])
+        return text, pt, ct, _build_telemetry(cfg, pt, ct, timings, think, text)
+    text, pt, ct = call_api(
+        cfg["base_url"], cfg["api_key"], cfg["model"], messages,
+        cfg["temperature"], cfg["max_tokens"], cfg["timeout"])
+    return text, pt, ct, None
+
+
+def _sequential_completion(item, cfg, sample_idx):
+    """Genuine multi-turn: answer each turn before revealing the next. Grades the
+    FINAL turn as primary; the committed turn-1 reply is returned via `extra` for
+    sub-gold grading. Returns (final_text, ptok, ctok, telemetry, err, extra)."""
+    last_err = None
+    for attempt in range(cfg["retries"] + 1):
+        try:
+            replies, pt_sum, ct_sum, telem = [], 0, 0, None
+            for ti in range(len(_turns_of(item))):
+                msgs = _sequential_messages(item, replies, cfg["ask_confidence"])
+                text, pt, ct, tlm = _call_turn(msgs, item, cfg, sample_idx, ti)
+                if not text:
+                    raise ValueError("empty turn reply")
+                replies.append(text)
+                pt_sum += pt or 0
+                ct_sum += ct or 0
+                telem = tlm or telem            # keep the latest turn's telemetry
+            extra = {"intermediate_text": replies[0]}
+            return replies[-1], pt_sum or None, ct_sum or None, telem, None, extra
+        except _RETRYABLE as e:
+            last_err = e
+            if attempt < cfg["retries"]:
+                time.sleep(min(2 ** attempt, 8))
+    return None, None, None, None, last_err, None
 
 
 def _one_completion(item, cfg, sample_idx):
-    """Return (text, ptok, ctok, telemetry, err). err is None on success."""
+    """Return (text, ptok, ctok, telemetry, err, extra). err is None on success.
+    `extra` carries the committed turn-1 reply for genuine multi-turn items."""
+    if item.get("subgold"):                     # genuine sequential multi-turn (E3/H3)
+        return _sequential_completion(item, cfg, sample_idx)
     last_err = None
     for attempt in range(cfg["retries"] + 1):
         try:
             if cfg.get("mock"):
                 text, pt, ct = mock_one(item, sample_idx, cfg["mock"])
                 telemetry = _build_telemetry(cfg, pt, ct, None, 0, text)
-                return text, pt, ct, telemetry, None
+                return text, pt, ct, telemetry, None, None
             elif _provider_has_capability(cfg, "native_anthropic"):
                 text, pt, ct, timings, think_tokens = call_anthropic(
                     cfg["api_key"], cfg["model"],
                     build_messages(item, cfg["ask_confidence"]),
                     cfg["temperature"], cfg["max_tokens"], cfg["timeout"])
                 telemetry = _build_telemetry(cfg, pt, ct, timings, think_tokens, text)
-                return text, pt, ct, telemetry, None
+                return text, pt, ct, telemetry, None, None
             else:
                 text, pt, ct = call_api(
                     cfg["base_url"], cfg["api_key"], cfg["model"],
                     build_messages(item, cfg["ask_confidence"]),
                     cfg["temperature"], cfg["max_tokens"], cfg["timeout"])
                 # OpenAI-compat: no stream timings available.
-                return text, pt, ct, None, None
+                return text, pt, ct, None, None, None
         except _RETRYABLE as e:
             last_err = e
             if attempt < cfg["retries"]:
                 time.sleep(min(2 ** attempt, 8))
-    return None, None, None, None, last_err
+    return None, None, None, None, last_err, None
 
 
 def _build_telemetry(cfg, prompt_tokens, completion_tokens, timings, think_tokens, text):
@@ -349,9 +431,10 @@ def _build_telemetry(cfg, prompt_tokens, completion_tokens, timings, think_token
 def _process(item, cfg):
     """Run all samples for one item. Returns (item_id, rows, telemetry_list, err_summary)."""
     rows, telemetry_list, last_err = [], [], None
+    choices = item["choices"].split("|") if item.get("choices") else None
     for s in range(cfg["n"]):
         t0 = time.time()
-        text, ptok, ctok, telemetry, err = _one_completion(item, cfg, s)
+        text, ptok, ctok, telemetry, err, extra = _one_completion(item, cfg, s)
         latency = int((time.time() - t0) * 1000)
         if err is not None:
             last_err = err
@@ -360,9 +443,16 @@ def _process(item, cfg):
         if telemetry is not None:
             telemetry_list.append((item["item_id"], s, telemetry))
         parsed, correct, conf, parse_source = grading.grade(
-            text, item["answer_type"], item["gold"],
-            item["choices"].split("|") if item.get("choices") else None)
-        rows.append((text, parsed, correct, conf, latency, ptok, ctok, parse_source))
+            text, item["answer_type"], item["gold"], choices)
+        metadata = {"parse_source": parse_source}
+        # Genuine multi-turn: grade the committed turn-1 reply against the subgold so
+        # metrics can separate "got the pre-pivot value" from "revised correctly".
+        if extra and item.get("subgold"):
+            iparsed, icorrect, _, _ = grading.grade(
+                extra["intermediate_text"], item["answer_type"], item["subgold"], choices)
+            metadata["intermediate_correct"] = bool(icorrect)
+            metadata["intermediate_parsed"] = iparsed
+        rows.append((text, parsed, correct, conf, latency, ptok, ctok, metadata))
     return item["item_id"], rows, telemetry_list, (str(last_err) if last_err else None)
 
 
@@ -453,9 +543,9 @@ def run(con, run_id, items, cfg):
                 item_id, rows, telemetry_list, err = futs[fut]["item_id"], [_ERROR_ROW], [], str(e)
             for item_id_t, s, telemetry in telemetry_list:
                 storage.save_telemetry(con, run_id, item_id_t, s, **telemetry)
-            for i, (raw, parsed, correct, conf, lat, pt, ct, parse_source) in enumerate(rows):
+            for i, (raw, parsed, correct, conf, lat, pt, ct, meta) in enumerate(rows):
                 storage.save_response(con, run_id, item_id, i, raw, parsed, correct, conf, lat, pt, ct,
-                                    metadata={"parse_source": parse_source})
+                                    metadata=meta)
             n_done += 1
             n_err += err is not None
             n_ok += err is None

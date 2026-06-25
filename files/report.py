@@ -324,6 +324,16 @@ def write_markdown(run_results, labels, charts, outpath):
         L.append(_md_table(["family"] + labels,
                            [[f] + [f"{r.get('distractibility', {}).get(f, {}).get('drop', float('nan')):+.3f}"
                                    for r in run_results] for f in dfams]))
+    if any(r.get("backtracking") for r in run_results):
+        L += ["", "## Backtracking (dynamic_pivot: commit → revise)", ""]
+        def _bt(r, key):
+            bt = r.get("backtracking") or {}
+            v = bt.get(key)
+            return f"{v:.3f}" if isinstance(v, float) else "—"
+        L.append(_md_table(
+            ["model", "commit acc", "revised (final) acc", "revision success | correct commit"],
+            [[lab, _bt(r, "intermediate_accuracy"), _bt(r, "final_accuracy"),
+              _bt(r, "revision_success")] for r, lab in zip(run_results, labels)]))
     L += ["", "## Charts", ""]
     for c in charts:
         if c:

@@ -1104,16 +1104,98 @@ def _verify_unsat_csp(prompt, gold):
         return gold == expected
     return gold == "UNDETERMINED"
 
-def _mk(family, difficulty, structure_seed, surface_seed, distractor, probe, grp):
-    result = GENERATORS[family](difficulty, structure_seed, surface_seed, distractor)
-    if len(result) == 5:
-        prompt, gold, atype, choices, turns = result
-    else:
-        prompt, gold, atype, choices = result
-        turns = None
-    iid = hashlib.sha1(f"{family}|{difficulty}|{structure_seed}|{surface_seed}|{distractor}|{probe}".encode()).hexdigest()[:16]
-    return Problem(iid, family, difficulty, structure_seed, surface_seed, distractor,
-                   probe, grp, atype, gold, choices, prompt, turns)
+
+# ------------------------------------------------ 11. dynamic_pivot (true backtracking)
+# Genuine commit-then-backtrack (E3/H3). Turn 1 asks for the count under the literal
+# reading -- the model COMMITS the sub-gold WITHOUT yet seeing the pivot. Turn 2 reveals
+# that every "moved" operation did not actually happen (the items stayed at the source
+# and the destination never received them), forcing the model to revise its committed
+# answer. Gold is the revised count; subgold is the committed (literal) count. This is
+# the one family that requires genuine sequential multi-turn execution (the runner calls
+# the model per turn) -- in a single shot a model would just read the pivot first and
+# never commit, which is exactly the E3 weakness of retroactive_edit.
+def gen_dynamic_pivot(difficulty, structure_seed, surface_seed, distractor):
+    rs = _rng("pivot-struct", difficulty, structure_seed)
+    ru = _rng("pivot-surf", structure_seed, surface_seed)
+    item = ru.choice(ITEMS)
+    names = ru.sample(CONTAINERS, 3)
+    literal = [rs.randint(5, 20) for _ in range(3)]   # moves relocate (the literal reading)
+    pivot = list(literal)                             # moves never happened (the revision)
+    move_delta = [0, 0, 0]                            # literal-only net move effect per container
+    clauses = [f"{names[i].capitalize()} has {literal[i]} {item}." for i in range(3)]
+    for _ in range(max(2, difficulty)):
+        op = rs.choice(["add", "remove", "move", "move"])   # bias toward moves so the pivot bites
+        i = rs.randrange(3)
+        # A remove must stay valid under BOTH readings so neither count goes negative.
+        max_rm = min(literal[i], pivot[i])
+        if op == "remove" and max_rm < 1:
+            op = "add"
+        if op == "move" and literal[i] < 1:
+            op = "add"
+        if op == "add":
+            k = rs.randint(2, 12); literal[i] += k; pivot[i] += k
+            clauses.append(f"{k} {item} are added to {names[i]}.")
+        elif op == "remove":
+            k = rs.randint(1, max_rm); literal[i] -= k; pivot[i] -= k
+            clauses.append(f"{k} {item} are removed from {names[i]}.")
+        else:  # move i -> j: literal relocates; pivot leaves both untouched
+            j = rs.choice([x for x in range(3) if x != i])
+            k = rs.randint(1, literal[i])
+            literal[i] -= k; literal[j] += k
+            move_delta[i] -= k; move_delta[j] += k
+            clauses.append(f"{k} {item} are moved from {names[i]} to {names[j]}.")
+    # Query a container whose count DIFFERS between the two readings, so the pivot is
+    # load-bearing (gold != subgold). If moves happened to cancel everywhere, force one.
+    candidates = [i for i in range(3) if move_delta[i] != 0]
+    if not candidates:
+        i, j = rs.sample(range(3), 2)
+        k = rs.randint(1, max(1, literal[i]))
+        literal[i] -= k; literal[j] += k; move_delta[j] += k
+        clauses.append(f"{k} {item} are moved from {names[i]} to {names[j]}.")
+        candidates = [j]
+    qi = rs.choice(candidates)
+    subgold = str(literal[qi])
+    gold = str(pivot[qi])
+    turn1 = " ".join(clauses) + f" How many {item} are in {names[qi]} now?"
+    turn2 = (f"Now reconsider the whole sequence: every time {item} were described as "
+             f"'moved' from one place to another, the move did not actually happen — the "
+             f"{item} stayed where they were and the destination never received them. "
+             f"With that correction, how many {item} are in {names[qi]} now?")
+    prompt = turn1 + " " + turn2
+    return prompt, gold, "int", None, [turn1, turn2], subgold
+
+
+def _replay_state(prompt, item, ignore_moves):
+    """Re-derive container counts for `item` from prompt text. With ignore_moves,
+    'moved' operations are treated as no-ops (the dynamic_pivot revision)."""
+    state = {}
+    for s in _sentences(prompt):
+        m = re.match(r"(.+?) has (\d+) (\w+)", s)
+        if m and " are " not in s and m.group(3) == item:
+            state[m.group(1).lower()] = int(m.group(2))
+    for s in _sentences(prompt):
+        if (m := re.match(r"(\d+) (\w+) are added to (.+?)\.", s)) and m.group(2) == item:
+            c = m.group(3).lower(); state[c] = state.get(c, 0) + int(m.group(1))
+        elif (m := re.match(r"(\d+) (\w+) are removed from (.+?)\.", s)) and m.group(2) == item:
+            c = m.group(3).lower(); state[c] = state.get(c, 0) - int(m.group(1))
+        elif (m := re.match(r"(\d+) (\w+) are moved from (.+?) to (.+?)\.", s)) and m.group(2) == item:
+            if ignore_moves:
+                continue
+            k = int(m.group(1))
+            state[m.group(3).lower()] = state.get(m.group(3).lower(), 0) - k
+            state[m.group(4).lower()] = state.get(m.group(4).lower(), 0) + k
+    return state
+
+
+def _verify_dynamic_pivot(prompt, gold):
+    # The primary gold is the REVISED count: moves never happened.
+    mq = re.search(r"How many (.+?) are in (.+?) now\?", prompt)
+    if not mq:
+        return False
+    item, qc = mq.group(1), mq.group(2).lower()
+    state = _replay_state(prompt, item, ignore_moves=True)
+    return str(state.get(qc)) == str(gold)
+
 
 GENERATORS = {
     "arithmetic": gen_arithmetic,
@@ -1127,13 +1209,20 @@ GENERATORS = {
     "composed": gen_composed,
     "redefined_ops": gen_redefined_ops,
     "unsat_csp": gen_unsat_csp,
+    "dynamic_pivot": gen_dynamic_pivot,
 }
 SUPPORTS_DISTRACTOR = {"arithmetic", "state_tracking", "ordering", "retroactive_edit",
                        "redefined_ops"}
 # The CSP families pick their structure in slot space and only label it from the
 # surface rng, so renaming is a true cosmetic perturbation with the gold held fixed.
 SUPPORTS_SURFACE = {"arithmetic", "state_tracking", "ordering", "retroactive_edit",
-                    "knights_knaves", "logic_grid", "redefined_ops", "unsat_csp"}
+                    "knights_knaves", "logic_grid", "redefined_ops", "unsat_csp",
+                    "dynamic_pivot"}
+
+# Families that require GENUINE sequential multi-turn execution: the model must
+# commit an answer to turn 1 BEFORE it sees the turn-2 pivot. Items carry a subgold
+# (the committed turn-1 answer) graded separately from the final gold.
+REQUIRES_SEQUENTIAL_TURNS = {"dynamic_pivot"}
 
 # For most families difficulty == number of reasoning steps and is open-ended.
 # Some families select a discrete tier / a brute-forced structure instead, where a
@@ -1143,6 +1232,7 @@ SUPPORTS_SURFACE = {"arithmetic", "state_tracking", "ordering", "retroactive_edi
 #   sequences      : rule-complexity tier 1..6
 FAMILY_MAX_DIFF = {"sequences": 6, "knights_knaves": 6, "logic_grid": 5, "composed": 5,
                     "unsat_csp": 6}
+# difficulty == number of update operations before the pivot, so it is a depth axis.
 
 # What the `difficulty` integer MEANS per family (bench-lop / E6). For most
 # families it is the number of reasoning steps, so the degradation curve is a true
@@ -1179,25 +1269,30 @@ class Problem:
     choices: Optional[List[str]]
     prompt: str
     turns: Optional[List[str]] = None
+    subgold: Optional[str] = None        # intermediate (pre-pivot) gold for backtracking families
 
     def row(self):
         d = asdict(self)
         d["choices"] = "|".join(self.choices) if self.choices else ""
         d["has_distractor"] = int(self.has_distractor)
         d["turns"] = "|".join(self.turns) if self.turns else ""
+        d["subgold"] = self.subgold or ""
         return d
 
 
 def _mk(family, difficulty, structure_seed, surface_seed, distractor, probe, grp):
     result = GENERATORS[family](difficulty, structure_seed, surface_seed, distractor)
-    if len(result) == 5:
+    subgold = None
+    if len(result) == 6:                 # (prompt, gold, atype, choices, turns, subgold)
+        prompt, gold, atype, choices, turns, subgold = result
+    elif len(result) == 5:
         prompt, gold, atype, choices, turns = result
     else:
         prompt, gold, atype, choices = result
         turns = None
     iid = hashlib.sha1(f"{family}|{difficulty}|{structure_seed}|{surface_seed}|{distractor}|{probe}".encode()).hexdigest()[:16]
     return Problem(iid, family, difficulty, structure_seed, surface_seed, distractor,
-                   probe, grp, atype, gold, choices, prompt, turns)
+                   probe, grp, atype, gold, choices, prompt, turns, subgold)
 
 
 # ---------------------------------------------------- independent gold verifiers
@@ -1512,6 +1607,7 @@ _VERIFIERS = {
     "composed": _verify_composed,
     "redefined_ops": _verify_redefined_ops,
     "unsat_csp": _verify_unsat_csp,
+    "dynamic_pivot": _verify_dynamic_pivot,
 }
 
 def verify_gold(p) -> bool:

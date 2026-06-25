@@ -13,6 +13,7 @@ Key principles from the methodology:
 
 import math
 import re
+import json
 from collections import defaultdict, Counter
 import numpy as np
 
@@ -20,8 +21,9 @@ import numpy as np
 def _fetch(con, run_id):
     """One row per (item, sample) joined with its dataset metadata."""
     q = """SELECT r.item_id, r.sample_idx, r.correct, r.confidence, r.parsed, r.raw,
+                  r.metadata,
                   d.family, d.difficulty, d.probe, d.grp, d.gold, d.answer_type,
-                  d.choices
+                  d.choices, d.subgold
            FROM responses r JOIN dataset d ON r.item_id = d.item_id
            WHERE r.run_id = ?"""
     return [dict(x) for x in con.execute(q, (run_id,))]
@@ -152,6 +154,7 @@ def compute(con, run_id):
     s0_correct = {}                 # item_id -> bool (sample 0, only if not an error)
     s0_parsed = {}                  # item_id -> parsed answer (sample 0)
     s0_conf = {}                    # item_id -> confidence (sample 0)
+    s0_meta = {}                    # item_id -> response metadata dict (sample 0)
     samples = defaultdict(list)     # item_id -> [(idx, correct, parsed, raw), ...]
     nsamples = 0
     for r in rows:
@@ -162,6 +165,13 @@ def compute(con, run_id):
         if r["sample_idx"] == 0:
             s0_parsed[iid] = r["parsed"]
             s0_conf[iid] = r["confidence"]
+            md = r["metadata"]
+            if isinstance(md, str):
+                try:
+                    md = json.loads(md)
+                except ValueError:
+                    md = None
+            s0_meta[iid] = md
             if r["correct"] is not None:           # None == errored, exclude from accuracy
                 s0_correct[iid] = bool(r["correct"])
 
@@ -370,6 +380,31 @@ def compute(con, run_id):
     if passk is not None:
         frontier_headroom = passk["pass@k_oracle"] - passk["pass@1"]
 
+    # ---- backtracking (genuine multi-turn commit-then-revise): dynamic_pivot.
+    # intermediate_accuracy = got the committed (pre-pivot) value right;
+    # final_accuracy = correctly revised after the pivot;
+    # revision_success = among items committed CORRECTLY, the share also revised
+    # correctly -- the cost of having to abandon a committed answer.
+    bt_items = [i for i in base if meta[i]["family"] == "dynamic_pivot"]
+    backtracking = None
+    if bt_items:
+        inter_ok = n_inter = committed = revised_ok = 0
+        for i in bt_items:
+            ic = (s0_meta.get(i) or {}).get("intermediate_correct")
+            fc = s0_correct.get(i)
+            if ic is not None:
+                n_inter += 1
+                inter_ok += int(bool(ic))
+                if ic:
+                    committed += 1
+                    revised_ok += int(bool(fc))
+        backtracking = {
+            "n": len(bt_items),
+            "intermediate_accuracy": float(inter_ok / n_inter) if n_inter else None,
+            "final_accuracy": fam_acc.get("dynamic_pivot"),
+            "revision_success": float(revised_ok / committed) if committed else None,
+        }
+
     # ---- grading fragility: marker-only vs fallback parse disagreement rate
     frag_disagree = 0
     frag_total = 0
@@ -426,6 +461,7 @@ def compute(con, run_id):
         "calibration": calibration, "passk": passk,
         "false_undetermined_rate": false_undetermined_rate,
         "behavioral_uncertainty": behavioral_uncertainty,
+        "backtracking": backtracking,
     }
 
 
@@ -470,4 +506,12 @@ def print_summary(res):
         pk = res["passk"]
         print(f"\npass@1 {pk['pass@1']:.3f}  |  maj@{pk['k']} {pk['maj@k']:.3f}  |  "
               f"pass@{pk['k']} (oracle) {pk['pass@k_oracle']:.3f}")
+    bt = res.get("backtracking")
+    if bt:
+        ia = bt["intermediate_accuracy"]; rs_ = bt["revision_success"]
+        print(f"\nbacktracking (dynamic_pivot, n={bt['n']}): "
+              f"commit {ia:.3f}  ->  revise {bt['final_accuracy']:.3f}  "
+              f"(revision success | correct commit: {rs_:.3f})"
+              if ia is not None and rs_ is not None else
+              f"\nbacktracking (dynamic_pivot, n={bt['n']}): final {bt['final_accuracy']}")
     print()

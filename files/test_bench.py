@@ -209,6 +209,41 @@ def test_surface_variants_vary_phrasing_hold_gold():
     assert saw_lexical_variation, "surface variants never changed verb phrasing"
 
 
+def test_dynamic_pivot_structure_and_subgold():
+    # bench-7fo / E3-H3: two turns, a committed subgold, and a load-bearing pivot
+    # (gold != subgold). The subgold must re-derive as the LITERAL reading (moves
+    # relocate); the gold as the REVISED reading (moves never happened).
+    import re as _re
+    for diff in range(1, 7):
+        for seed in range(25):
+            p = generators._mk("dynamic_pivot", diff, seed, 0, False, "base", "g")
+            assert p.turns and len(p.turns) == 2
+            assert p.subgold is not None and p.gold != p.subgold      # pivot is load-bearing
+            assert generators.verify_gold(p) is True                  # gold = revised reading
+            mq = _re.search(r"How many (.+?) are in (.+?) now", p.prompt)
+            item, qc = mq.group(1), mq.group(2).lower()
+            literal = generators._replay_state(p.prompt, item, ignore_moves=False)
+            assert str(literal.get(qc)) == p.subgold                  # subgold = literal reading
+
+
+def test_dynamic_pivot_backtracking_metric_end_to_end():
+    # The genuine multi-turn runner must grade the committed turn-1 reply (subgold)
+    # separately from the revised final (gold), and metrics must expose both.
+    items = generators.build_dataset(["dynamic_pivot"], 1, 4, 5, verify=True)
+    con, ds = _db_with(items)
+    runner.run(con, "r", ds, _cfg(mock="perfect", model="mock", n=1, ask_confidence=False))
+    # metadata carries the intermediate (committed) grade
+    md = json.loads(con.execute(
+        "SELECT metadata FROM responses WHERE run_id='r' LIMIT 1").fetchone()["metadata"])
+    assert "intermediate_correct" in md
+    bt = metrics.compute(con, "r")["backtracking"]
+    assert bt["n"] == len(items)
+    # perfect mock commits AND revises every item correctly
+    assert bt["intermediate_accuracy"] == pytest.approx(1.0)
+    assert bt["final_accuracy"] == pytest.approx(1.0)
+    assert bt["revision_success"] == pytest.approx(1.0)
+
+
 def test_difficulty_axis_labels_are_honest():
     # bench-lop / E6: the difficulty axis is not the same quantity across families.
     # Tier/size families must be labelled distinctly from the default "reasoning steps".
@@ -748,6 +783,9 @@ def test_baseline_metrics_unchanged():
                 # bench-9et.1 adds unsat_csp to SUPPORTS_SURFACE;
                 # the new surface variants change the invariance metrics.
                 top.pop("unsat_csp", None)
+                # bench-7fo adds the dynamic_pivot family (genuine multi-turn
+                # backtracking), absent from the baseline fixture.
+                top.pop("dynamic_pivot", None)
         return out
 
     assert json.dumps(per_family(res), sort_keys=True, indent=2) == \
