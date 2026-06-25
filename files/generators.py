@@ -447,14 +447,18 @@ def gen_knights(difficulty, structure_seed, surface_seed, distractor):
         else:
             sents.append(f"{names[st[1]]} says that {names[st[2]]} and {names[st[3]]} "
                          f"are {'the same type' if st[4] else 'different types'}.")
-    # Ask about a specific islander's type (answer space 2: knight/knave)
-    query_slot = rs.randrange(n)
-    gold = "knight" if typ[query_slot] else "knave"
+    # De-collapse the answer space from binary to 2^n (set of all knaves).
+    # Gold is the sorted, comma-separated list of knave names; empty if
+    # all inhabitants are knights.
+    knave_names = sorted(names[s] for s in slots if not typ[s])
+    gold = ", ".join(knave_names)
     prompt = ("On an island, every inhabitant is either a knight (who always tells the "
               "truth) or a knave (who always lies). Its inhabitants are "
               + ", ".join(names) + ". They say:\n" + "\n".join(sents)
-              + f"\nIs {names[query_slot]} a knight or a knave?")
-    return prompt, gold, "choice", ["knight", "knave"]
+              + "\nList every knave on this island (comma-separated, e.g. 'Maria, Tom\u00e1s'). "
+                "If everyone is a knight, answer 'none'.")
+    return prompt, gold, "set", names
+
 
 
 # ---------------------------------------------------- 6. logic grid (zebra-lite)
@@ -1217,7 +1221,7 @@ def _verify_retroactive_edit(prompt, gold):
     return str(state.get(mq.group(1).lower().strip())) == str(gold)
 def _kk_parse(prompt):
     """Re-derive (names, statements) from a knights & knaves prompt's text."""
-    m = re.search(r"inhabitants are (.+?)\. They say", prompt, re.S)
+    m = re.search(r"inhabitants are (.+?)\. They say\b", prompt, re.S)
     names = [x.strip() for x in m.group(1).split(",")] if m else []
     stmts = []
     for mm in re.finditer(r"(\w+) says that (\w+) is a (knight|knave)\.", prompt):
@@ -1232,6 +1236,8 @@ def _kk_parse(prompt):
         if nm not in names:
             names.append(nm)
     return names, stmts
+
+
 def _verify_knights(prompt, gold):
     names, stmts = _kk_parse(prompt)
     if not names or not stmts:
@@ -1239,15 +1245,13 @@ def _verify_knights(prompt, gold):
     sols = _kk_all_solutions(names, stmts)
     if len(sols) != 1:
         return False
-    # Parse the queried islander from "Is X a knight or a knave?"
-    mq = re.search(r"Is (\w+) a knight or a knave\?", prompt)
-    if not mq:
-        return False
-    query_name = mq.group(1)
-    is_knight = sols[0].get(query_name, None)
-    if is_knight is None:
-        return False
-    return ("knight" if is_knight else "knave") == gold
+    # Gold is the sorted, comma-separated list of knave names (2^n answer
+    # space). Compare case-insensitively so a model that lowercases a
+    # name still passes.
+    knave_set = {n.lower() for n, is_knight in sols[0].items() if not is_knight}
+    gold_set = {t.strip().lower() for t in gold.split(",") if t.strip()}
+    return knave_set == gold_set
+
 
 
 def _lg_parse(prompt):

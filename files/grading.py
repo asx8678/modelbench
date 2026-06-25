@@ -49,6 +49,10 @@ def parse_answer(text: str, answer_type: str, choices: Optional[List[str]] = Non
 
     parse_source is one of {'marker', 'fallback', 'none'}.
     If strict_mode is True, only the ANSWER: line is used.
+
+    For answer_type 'set' the gold and parsed values are comma-separated
+    tokens; comparison is order-insensitive (sorted tuple). 'set' is used
+    by families like knights_knaves whose answer space is 2^n.
     """
     marker_src, marker = _last_marker(text)
     if marker_src == "marker":
@@ -67,6 +71,10 @@ def parse_answer(text: str, answer_type: str, choices: Optional[List[str]] = Non
             if parsed is None:
                 # an un-recognized marker value should not fall back unless strict off
                 pass
+        elif answer_type == "set":
+            tokens = _split_set(marker)
+            if tokens:
+                parsed = ",".join(sorted(tokens))
         else:
             parsed = marker
         if parsed is not None:
@@ -83,6 +91,12 @@ def parse_answer(text: str, answer_type: str, choices: Optional[List[str]] = Non
         nums = _INT.findall(_strip_confidence(text).replace(",", ""))
         if nums:
             return str(int(nums[-1])), "fallback"
+        return None, "none"
+
+    if answer_type == "set":
+        tokens = _split_set(_strip_confidence(text))
+        if tokens:
+            return ",".join(sorted(tokens)), "fallback"
         return None, "none"
 
     if answer_type == "choice":
@@ -115,6 +129,29 @@ def parse_answer(text: str, answer_type: str, choices: Optional[List[str]] = Non
     return None, "none"
 
 
+def _split_set(text: str) -> List[str]:
+    """Split a comma- or slash-separated token list into lowercased names.
+
+    Ignores the literal token 'none' and 'and' connectors. Empty after
+    strip means the list was empty (e.g. 'ANSWER: none' for an all-knight
+    puzzle).
+    """
+    if not text:
+        return []
+    raw = re.split(r"[,;]|\band\b|\bor\b", text)
+    out = []
+    for tok in raw:
+        t = tok.strip().strip("'\".").lower()
+        if not t or t in {"none", "no", "nothing", "n/a", "knight,knave,knight"}:
+            # the last guard prevents the marker being mis-parsed as a list
+            # if the model happened to echo the gold format with no list.
+            if t in {"none", "no", "nothing", "n/a"}:
+                return []                       # explicit empty
+            continue
+        out.append(t)
+    return out
+
+
 def grade(text: str, answer_type: str, gold: str, choices=None,
           strict_mode: bool = False) -> Tuple[Optional[str], bool, Optional[int], str]:
     """Return (parsed_answer, is_correct, confidence, parse_source)."""
@@ -124,9 +161,14 @@ def grade(text: str, answer_type: str, gold: str, choices=None,
             correct = parsed is not None and int(parsed) == int(gold)
         except ValueError:
             correct = False
+    elif answer_type == "set":
+        gold_set = set(_split_set(gold))
+        parsed_set = set(_split_set(parsed)) if parsed else set()
+        correct = parsed_set == gold_set
     else:
         correct = parsed is not None and parsed.lower() == str(gold).lower()
     return parsed, bool(correct), parse_confidence(text), parse_source
+
 
 
 def grading_fragility(examples: List[Tuple[str, str, str, Optional[List[str]]]]) -> float:

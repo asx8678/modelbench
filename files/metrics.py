@@ -57,7 +57,7 @@ def _chance_baseline(family, difficulty):
     if family == "unsat_csp":
         return 0.25
     if family == "knights_knaves":
-        return 0.5
+        return 1.0 / (2 ** (difficulty + 2))
     if family == "logic_grid":
         return 1.0 / (difficulty + 2)
     if family in ("arithmetic", "state_tracking", "sequences"):

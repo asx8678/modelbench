@@ -33,8 +33,8 @@ def test_acc_above_chance_is_at_most_accuracy():
 def test_chance_baseline_values_for_known_families():
     # ordering: choice over (difficulty+2) ranks
     assert metrics._chance_baseline("ordering", 3) == pytest.approx(1.0 / 5)
-    # knights_knaves: binary knight/knave choice
-    assert metrics._chance_baseline("knights_knaves", 3) == pytest.approx(0.5)
+    # knights_knaves: set answer over 2^n assignments (n = difficulty+2)
+    assert metrics._chance_baseline("knights_knaves", 3) == pytest.approx(1.0 / 32)
     # composed: choice over (difficulty+2) names
     assert metrics._chance_baseline("composed", 3) == pytest.approx(1.0 / 5)
     # unsat_csp: 4-way determinate choice
