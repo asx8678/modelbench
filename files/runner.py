@@ -307,9 +307,15 @@ def _build_telemetry(cfg, prompt_tokens, completion_tokens, timings, think_token
     if first_reasoning_ms is not None:
         unobservable["first_reasoning_ms"] = "ops_only_equals_ttft_when_display_omitted"
 
-    # reasoning_wall_ms has no direct producer; label as such.
-    reasoning_wall_ms = None
-    unobservable["reasoning_wall_ms"] = "no_direct_producer"
+    # reasoning_wall_ms defensible proxy: time from stream start to the
+    # end of reasoning / start of answer (answer_wall - ttft). When the
+    # provider uses display:omitted, the raw CoT is never returned, so
+    # this is the best available lower bound on wall-clock reasoning time.
+    if answer_wall_ms is not None and ttft_ms is not None:
+        reasoning_wall_ms = max(answer_wall_ms - ttft_ms, 0)
+    else:
+        reasoning_wall_ms = None
+        unobservable["reasoning_wall_ms"] = "ttft_or_answer_wall_unavailable"
 
     # These columns are unobservable on Anthropic / current stream parser.
     unobservable["token_entropy"] = "unobservable"

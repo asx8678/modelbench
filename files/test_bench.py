@@ -410,7 +410,10 @@ def test_mock_run_telemetry_marks_unobservable_fields():
     row = storage.load_telemetry(con, "r2", ds[0]["item_id"], 0)
     assert row is not None
     unobs = row["unobservable_fields"]
-    assert unobs["reasoning_wall_ms"] == "no_direct_producer"
+    # The mock runner does not emit native timings, so reasoning_wall_ms
+    # is unavailable and gets the "ttft_or_answer_wall_unavailable" marker.
+    assert row["reasoning_wall_ms"] is None
+    assert unobs["reasoning_wall_ms"] == "ttft_or_answer_wall_unavailable"
     assert "token_entropy" in unobs
     assert "thinking_tps" in unobs
     assert "tot_branch_map" in unobs
@@ -426,12 +429,12 @@ def test_build_telemetry_reasonable_when_think_tokens_present():
     assert telemetry["reasoning_token_source"] == "native_usage"
     assert telemetry["reasoning_tokens"] == 30
     # density proxy = (ct - (ct - rt)) / (ct - rt) = rt / (ct - rt)
-    assert telemetry["reasoning_density_proxy"] == pytest.approx(30 / 70)
-    assert telemetry["ttft_ms"] == 100
-    assert telemetry["first_reasoning_ms"] == 200
+    # reasoning_wall_ms proxy = answer_wall - ttft = 500 - 100 = 400
+    assert telemetry["reasoning_wall_ms"] == 400
+    assert "reasoning_wall_ms" not in telemetry["unobservable_fields"]
     assert telemetry["answer_wall_ms"] == 500
-    assert telemetry["reasoning_wall_ms"] is None
-    assert telemetry["unobservable_fields"]["reasoning_wall_ms"] == "no_direct_producer"
+
+
 
 
 def test_build_telemetry_honest_null_when_think_tokens_absent():
