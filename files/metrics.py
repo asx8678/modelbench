@@ -424,7 +424,6 @@ def compute(con, run_id):
         "degradation": {f: dict(d) for f, d in curve.items()},
         "distractibility": distract, "invariance": invariance,
         "calibration": calibration, "passk": passk,
-        "confabulation_rate": confabulation_rate,
         "false_undetermined_rate": false_undetermined_rate,
         "behavioral_uncertainty": behavioral_uncertainty,
     }

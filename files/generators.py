@@ -1451,8 +1451,6 @@ def _verify_logic_grid(prompt, gold):
 def _verify_multi_turn_inject(prompt, gold):
     state = {}
     for s in _sentences(prompt):
-        if s.startswith("A nearby"):
-            continue
         m = re.match(r"(.+?) has (\d+) ", s)
         if m and " are " not in s:
             state[m.group(1).lower()] = int(m.group(2))
