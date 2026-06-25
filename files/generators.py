@@ -792,6 +792,116 @@ def _verify_redefined_ops(prompt, gold):
     return str(current) == str(gold)
 
 
+
+# ------------------------------------------------ 10. unsat_csp (premise-flaw)
+# Build a KK or logic-grid puzzle, then with controlled probability make it
+# ill-posed: drop a clue (→ multiple solutions → UNDETERMINED) or inject a
+# contradiction (→ zero solutions → NO_SOLUTION). Otherwise keep unique.
+def gen_unsat_csp(difficulty, structure_seed, surface_seed, distractor):
+    rs = _rng("unsat-struct", difficulty, structure_seed)
+    ru = _rng("unsat-surf", structure_seed, surface_seed)
+    n = difficulty + 2
+    slots = list(range(n))
+    typ = {s: rs.random() < 0.5 for s in slots}
+
+    # Build a unique KK puzzle (same as gen_knights).
+    pool = []
+    for x in slots:
+        others = [o for o in slots if o != x]
+        for y in others:
+            pool.append(("ABS", x, y, typ[x] == typ[y]))
+        for i in range(len(others)):
+            for j in range(i + 1, len(others)):
+                y, z = others[i], others[j]
+                eq = (typ[y] == typ[z])
+                pool.append(("REL", x, y, z, typ[x] == eq))
+    rs.shuffle(pool)
+
+    remaining = _kk_all_solutions(slots, [])
+    chosen, changed = [], True
+    while len(remaining) > 1 and changed:
+        changed = False
+        for st in pool:
+            if st in chosen:
+                continue
+            nr = [t for t in remaining if _kk_consistent(st, t)]
+            if len(nr) < len(remaining):
+                chosen.append(st); remaining = nr; changed = True
+                if len(remaining) == 1:
+                    break
+    chosen = _drop_redundant(chosen, lambda kept: len(_kk_all_solutions(slots, kept)) == 1)
+
+    # Decide: keep unique (40%), drop clue (30%), inject contradiction (30%).
+    r = rs.random()
+    if r < 0.3 and len(chosen) > 1:
+        drop_idx = rs.randrange(len(chosen))
+        ill_clues = chosen[:drop_idx] + chosen[drop_idx + 1:]
+    elif r < 0.6:
+        # Construct a statement that's FALSE under the true types.
+        contradiction = None
+        for x in slots:
+            for y in slots:
+                if x == y:
+                    continue
+                # "x says y is knight" — false when knight says knave or knave says knight
+                want_knight = typ[y]
+                st = ("ABS", x, y, not want_knight)  # opposite of truth
+                if not _kk_consistent(st, typ):
+                    contradiction = st
+                    break
+            if contradiction:
+                break
+        ill_clues = chosen + [contradiction] if contradiction else chosen
+    else:
+        ill_clues = chosen
+
+    # Compute gold from actual solution count — single source of truth.
+    sols = _kk_all_solutions(slots, ill_clues)
+    names = ru.sample(NAMES, n)
+    query_slot = rs.randrange(n)
+    if len(sols) == 0:
+        gold = "NO_SOLUTION"
+    elif len(sols) > 1:
+        gold = "UNDETERMINED"
+    else:
+        gold = "knight" if sols[0][query_slot] else "knave"
+
+    ru.shuffle(ill_clues)
+    sents = []
+    for st in ill_clues:
+        if st[0] == "ABS":
+            sents.append(f"{names[st[1]]} says that {names[st[2]]} is a "
+                         f"{'knight' if st[3] else 'knave'}.")
+        else:
+            sents.append(f"{names[st[1]]} says that {names[st[2]]} and {names[st[3]]} "
+                         f"are {'the same type' if st[4] else 'different types'}.")
+    prompt = ("On an island, every inhabitant is either a knight (who always tells the "
+              "truth) or a knave (who always lies). Its inhabitants are "
+              + ", ".join(names) + ". They say:\n" + "\n".join(sents)
+              + f"\nIs {names[query_slot]} a knight or a knave?")
+    return prompt, gold, "choice", ["knight", "knave", "UNDETERMINED", "NO_SOLUTION"]
+
+
+def _verify_unsat_csp(prompt, gold):
+    """Re-derive solution count from prompt text and check gold matches."""
+    names, stmts = _kk_parse(prompt)
+    if not names:
+        return False
+    sols = _kk_all_solutions(names, stmts)
+    mq = re.search(r"Is (\w+) a knight or a knave\?", prompt)
+    if not mq:
+        return False
+    query_name = mq.group(1)
+    if len(sols) == 0:
+        return gold == "NO_SOLUTION"
+    elif len(sols) > 1:
+        return gold == "UNDETERMINED"
+    else:
+        is_knight = sols[0].get(query_name, None)
+        if is_knight is None:
+            return False
+        return gold == ("knight" if is_knight else "knave")
+
 def _mk(family, difficulty, structure_seed, surface_seed, distractor, probe, grp):
     result = GENERATORS[family](difficulty, structure_seed, surface_seed, distractor)
     if len(result) == 5:
@@ -802,7 +912,6 @@ def _mk(family, difficulty, structure_seed, surface_seed, distractor, probe, grp
     iid = hashlib.sha1(f"{family}|{difficulty}|{structure_seed}|{surface_seed}|{distractor}|{probe}".encode()).hexdigest()[:16]
     return Problem(iid, family, difficulty, structure_seed, surface_seed, distractor,
                    probe, grp, atype, gold, choices, prompt, turns)
-
 
 GENERATORS = {
     "arithmetic": gen_arithmetic,
@@ -815,6 +924,7 @@ GENERATORS = {
     "logic_grid": gen_logic_grid,
     "composed": gen_composed,
     "redefined_ops": gen_redefined_ops,
+    "unsat_csp": gen_unsat_csp,
 }
 SUPPORTS_DISTRACTOR = {"arithmetic", "state_tracking", "ordering", "retroactive_edit",
                        "redefined_ops"}
@@ -829,7 +939,8 @@ SUPPORTS_SURFACE = {"arithmetic", "state_tracking", "ordering", "retroactive_edi
 # the gold-verification search (the CSP families). Cap those rather than emit
 # "difficulties" that are not actually harder or not feasible to verify.
 #   sequences      : rule-complexity tier 1..6
-FAMILY_MAX_DIFF = {"sequences": 6, "knights_knaves": 6, "logic_grid": 5, "composed": 5}
+FAMILY_MAX_DIFF = {"sequences": 6, "knights_knaves": 6, "logic_grid": 5, "composed": 5,
+                    "unsat_csp": 6}
 
 
 @dataclass
@@ -1192,6 +1303,7 @@ _VERIFIERS = {
     "logic_grid": _verify_logic_grid,
     "composed": _verify_composed,
     "redefined_ops": _verify_redefined_ops,
+    "unsat_csp": _verify_unsat_csp,
 }
 
 def verify_gold(p) -> bool:

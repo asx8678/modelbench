@@ -334,6 +334,17 @@ def compute(con, run_id):
                 frag_disagree += 1
     grading_fragility = float(frag_disagree / frag_total) if frag_total else None
 
+
+    # ---- confabulation rate: ill-posed items answered with concrete value
+    ill_posed = [i for i in base if meta[i]["gold"] in ("UNDETERMINED", "NO_SOLUTION")]
+    confab_count = 0
+    for i in ill_posed:
+        if i in s0_correct:
+            parsed = s0_parsed.get(i)
+            if parsed and parsed not in ("UNDETERMINED", "NO_SOLUTION"):
+                confab_count += 1
+    confabulation_rate = float(confab_count / len(ill_posed)) if ill_posed else None
+
     return {
         "run_id": run_id, "n_items": n_items, "samples_per_item": nsamples,
         "coverage": coverage,
@@ -342,6 +353,7 @@ def compute(con, run_id):
         "acc_above_chance": acc_above_chance,
         "frontier_headroom": frontier_headroom,
         "grading_fragility": grading_fragility,
+        "confabulation_rate": confabulation_rate,
         "degradation": {f: dict(d) for f, d in curve.items()},
         "distractibility": distract, "invariance": invariance,
         "calibration": calibration, "passk": passk,
