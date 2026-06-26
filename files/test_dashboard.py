@@ -210,5 +210,106 @@ def test_runtime_stats_none_for_unknown_run():
     assert metrics.runtime_stats(con, "nope") is None
 
 
+def test_runtime_stats_reasoning_tokens_aggregated():
+    con = storage.connect(":memory:")
+    # two correct calls, 100 completion tokens each (200 total)
+    storage.save_response(con, "r", "i1", 0, "ANSWER: 1", "1", 1, None, 10, 5, 100)
+    storage.save_response(con, "r", "i2", 0, "ANSWER: 2", "1", 1, None, 10, 5, 100)
+    # provider exposed 40 reasoning tokens on each (80 total)
+    for iid in ("i1", "i2"):
+        storage.save_telemetry(con, "r", iid, 0, reasoning_token_source="native_usage",
+                               completion_tokens=100, reasoning_tokens=40)
+    con.commit()
+    rs = metrics.runtime_stats(con, "r")
+    assert rs["reasoning_available"] is True
+    assert rs["reasoning_tokens_total"] == 80 and rs["reasoning_tokens_mean"] == 40
+    assert abs(rs["reasoning_fraction"] - 0.4) < 1e-9          # 80 / 200 completion
+    assert abs(rs["reasoning_tokens_per_correct"] - 40.0) < 1e-9   # 80 / 2 correct
+
+
+def test_runtime_stats_reasoning_absent_when_provider_silent():
+    con = storage.connect(":memory:")
+    storage.save_response(con, "r", "i1", 0, "ANSWER: 1", "1", 1, None, 10, 5, 100)
+    storage.save_telemetry(con, "r", "i1", 0, reasoning_token_source="unavailable",
+                           completion_tokens=100, reasoning_tokens=0)
+    con.commit()
+    rs = metrics.runtime_stats(con, "r")
+    assert rs["reasoning_available"] is False
+    assert rs["reasoning_fraction"] is None
+    assert rs["reasoning_tokens_per_correct"] is None
+
+
+def test_runtime_stats_intelligence_metrics():
+    """Test reasoning_by_difficulty, efficiency (per_1k), and effort scaling."""
+    con = storage.connect(":memory:")
+    # Build dataset with 2 difficulties: difficulty 1 (easy) and difficulty 3 (hard).
+    # Easy items (difficulty 1): less reasoning, higher accuracy (less overthinking).
+    # Hard items (difficulty 3): more reasoning, lower accuracy (but still trying).
+    items = generators.build_dataset(["arithmetic"], 1, 3, 2, verify=False)
+    storage.save_dataset(con, items)
+
+    # Extract the generated item IDs from the dataset and partition by difficulty
+    dataset = storage.load_dataset(con)
+    easy_items = [d["item_id"] for d in dataset if d["difficulty"] == 1][:2]
+    hard_items = [d["item_id"] for d in dataset if d["difficulty"] == 3][:2]
+
+    # Manually create responses and telemetry for controlled testing.
+    # Easy items: both correct, 30 reasoning tokens each
+    storage.save_response(con, "r", easy_items[0], 0, "ANSWER: 1", "1", 1, None, 10, 5, 100)
+    storage.save_response(con, "r", easy_items[1], 0, "ANSWER: 2", "2", 1, None, 10, 5, 100)
+    storage.save_telemetry(con, "r", easy_items[0], 0, reasoning_token_source="native_usage",
+                           completion_tokens=100, reasoning_tokens=30)
+    storage.save_telemetry(con, "r", easy_items[1], 0, reasoning_token_source="native_usage",
+                           completion_tokens=100, reasoning_tokens=30)
+
+    # Hard items: 1 correct, 50 reasoning tokens each
+    storage.save_response(con, "r", hard_items[0], 0, "ANSWER: 3", "3", 1, None, 10, 5, 100)
+    storage.save_response(con, "r", hard_items[1], 0, "ANSWER: 4", "5", 0, None, 10, 5, 100)
+    storage.save_telemetry(con, "r", hard_items[0], 0, reasoning_token_source="native_usage",
+                           completion_tokens=100, reasoning_tokens=50)
+    storage.save_telemetry(con, "r", hard_items[1], 0, reasoning_token_source="native_usage",
+                           completion_tokens=100, reasoning_tokens=50)
+
+    con.commit()
+
+    rs = metrics.runtime_stats(con, "r")
+
+    # Check that reasoning is available
+    assert rs["reasoning_available"] is True
+    assert rs["reasoning_tokens_total"] == 160  # 30+30+50+50
+
+    # Check reasoning_by_difficulty
+    by_diff = rs["reasoning_by_difficulty"]
+    assert 1 in by_diff and 3 in by_diff
+    # Easy (difficulty 1): mean 30, accuracy 1.0, n=2
+    assert by_diff[1]["mean_reasoning_tokens"] == 30
+    assert by_diff[1]["accuracy"] == 1.0
+    assert by_diff[1]["n"] == 2
+    # Hard (difficulty 3): mean 50, accuracy 0.5, n=2
+    assert by_diff[3]["mean_reasoning_tokens"] == 50
+    assert by_diff[3]["accuracy"] == 0.5
+    assert by_diff[3]["n"] == 2
+
+    # Check efficiency: 3 correct out of 160 reasoning tokens
+    # 3 * 1000 / 160 = 18.75
+    assert abs(rs["reasoning_correct_per_1k"] - 18.75) < 1e-6
+
+    # Check effort scaling: easy/hard = 30/50 = 0.6
+    # This indicates the model uses less reasoning on easy items (good!)
+    assert abs(rs["reasoning_effort_scaling"] - 0.6) < 1e-6
+
+
+def test_runtime_stats_intelligence_metrics_absent_without_reasoning():
+    """When no reasoning data, intelligence metrics should be empty/None."""
+    con = storage.connect(":memory:")
+    storage.save_response(con, "r", "i1", 0, "ANSWER: 1", "1", 1, None, 10, 5, 100)
+    con.commit()
+    rs = metrics.runtime_stats(con, "r")
+    assert rs["reasoning_available"] is False
+    assert rs["reasoning_by_difficulty"] == {}
+    assert rs["reasoning_correct_per_1k"] is None
+    assert rs["reasoning_effort_scaling"] is None
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

@@ -489,10 +489,80 @@ def runtime_stats(con, run_id):
     ctok = [r["completion_tokens"] for r in rows if r["completion_tokens"] is not None]
     errored = sum(1 for r in rows if r["raw"] == "__ERROR__")
 
+    # Reasoning ("thinking") tokens come from the telemetry table, populated only
+    # when the provider actually exposes a hidden-reasoning count (Anthropic native
+    # usage, or OpenAI-compatible completion_tokens_details.reasoning_tokens). When
+    # no provider reported it, reasoning stats are honestly absent rather than zero.
+    rtok = [r["reasoning_tokens"] for r in con.execute(
+        "SELECT reasoning_tokens FROM telemetry WHERE run_id=? "
+        "AND reasoning_token_source IS NOT NULL "
+        "AND reasoning_token_source != 'unavailable' "
+        "AND reasoning_tokens IS NOT NULL", (run_id,)).fetchall()]
+    n_correct = con.execute(
+        "SELECT COUNT(*) FROM responses WHERE run_id=? AND correct=1", (run_id,)).fetchone()[0]
+    reasoning_total = int(sum(rtok)) if rtok else 0
+    completion_total = int(sum(ctok))
+
     def _pct(xs, q):
         return int(round(float(np.percentile(xs, q)))) if xs else 0
 
-    return {
+    # Intelligence metrics: reasoning by difficulty, efficiency, effort scaling.
+    # These require a 3-way join and are only computed when reasoning is available.
+    reasoning_by_difficulty = {}
+    reasoning_correct_per_1k = None
+    reasoning_effort_scaling = None
+
+    if rtok:  # only compute when reasoning data exists
+        # Join telemetry + responses + dataset to get reasoning-measured rows with correctness & difficulty
+        reasoning_rows = con.execute(
+            """SELECT t.reasoning_tokens, d.difficulty, r.correct
+               FROM telemetry t
+               JOIN responses r ON r.run_id=t.run_id AND r.item_id=t.item_id AND r.sample_idx=t.sample_idx
+               JOIN dataset d ON d.item_id=t.item_id
+               WHERE t.run_id=?
+               AND t.reasoning_token_source IS NOT NULL
+               AND t.reasoning_token_source != 'unavailable'
+               AND t.reasoning_tokens IS NOT NULL""", (run_id,)).fetchall()
+
+        # Aggregate by difficulty
+        by_diff = defaultdict(list)
+        correct_count = 0
+        for row in reasoning_rows:
+            difficulty = row["difficulty"]
+            tokens = row["reasoning_tokens"]
+            is_correct = row["correct"]
+            by_diff[difficulty].append((tokens, is_correct))
+            if is_correct:
+                correct_count += 1
+
+        # Build reasoning_by_difficulty: mean tokens, accuracy, count per tier
+        for diff in sorted(by_diff.keys()):
+            data = by_diff[diff]
+            n = len(data)
+            mean_tokens = int(round(float(np.mean([t for t, _ in data]))))
+            accuracy = float(sum(1 for _, c in data if c) / n) if n else 0.0
+            reasoning_by_difficulty[diff] = {
+                "mean_reasoning_tokens": mean_tokens,
+                "accuracy": accuracy,
+                "n": n,
+            }
+
+        # Efficiency: correct predictions per 1000 reasoning tokens
+        if reasoning_total > 0:
+            reasoning_correct_per_1k = float((correct_count * 1000) / reasoning_total)
+
+        # Effort scaling: ratio of mean reasoning on easiest vs hardest tier
+        # ~1.0 = no scaling (overthinks easy); <1.0 = scales up with difficulty
+        if len(by_diff) > 1:
+            diffs = sorted(by_diff.keys())
+            easiest = diffs[0]
+            hardest = diffs[-1]
+            mean_easy = float(np.mean([t for t, _ in by_diff[easiest]]))
+            mean_hard = float(np.mean([t for t, _ in by_diff[hardest]]))
+            if mean_hard > 0:
+                reasoning_effort_scaling = mean_easy / mean_hard
+
+    result = {
         "n_calls": len(rows),
         "errored": errored,
         "latency_p50_ms": _pct(lat, 50),
@@ -500,9 +570,25 @@ def runtime_stats(con, run_id):
         "latency_mean_ms": int(round(float(np.mean(lat)))) if lat else 0,
         "tokens_available": bool(ctok),
         "prompt_tokens_total": int(sum(ptok)),
-        "completion_tokens_total": int(sum(ctok)),
+        "completion_tokens_total": completion_total,
         "completion_tokens_mean": int(round(float(np.mean(ctok)))) if ctok else 0,
+        # reasoning-token signals (the "intelligence behind it"): how much hidden
+        # thinking the model spent, what share of output it was, and how much it
+        # cost per right answer (a crude reasoning-efficiency).
+        "reasoning_available": bool(rtok),
+        "reasoning_tokens_total": reasoning_total,
+        "reasoning_tokens_mean": int(round(float(np.mean(rtok)))) if rtok else 0,
+        "reasoning_fraction": (reasoning_total / completion_total)
+                              if (rtok and completion_total) else None,
+        "reasoning_tokens_per_correct": (reasoning_total / n_correct)
+                                        if (rtok and n_correct) else None,
+        # Intelligence metrics: reasoning allocation and efficiency
+        "reasoning_by_difficulty": reasoning_by_difficulty,
+        "reasoning_correct_per_1k": reasoning_correct_per_1k,
+        "reasoning_effort_scaling": reasoning_effort_scaling,
     }
+
+    return result
 
 
 def print_summary(res):

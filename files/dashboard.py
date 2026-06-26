@@ -367,6 +367,17 @@ def _section_runtime(rstats, paint, caps):
     else:
         tok = paint.dim("not reported by provider")
     out.append(f"  {_pad('tokens', _LABEL_W)} {tok}")
+    if rstats.get("reasoning_available"):
+        parts = [f"{rstats['reasoning_tokens_total']:,} reasoning "
+                 f"(mean {rstats['reasoning_tokens_mean']}/item)"]
+        if rstats.get("reasoning_fraction") is not None:
+            parts.append(f"{rstats['reasoning_fraction'] * 100:.0f}% of completion")
+        # Intelligence metrics: efficiency (correct/1k tokens) and effort scaling (easy/hard ratio)
+        if rstats.get("reasoning_correct_per_1k") is not None:
+            parts.append(f"{rstats['reasoning_correct_per_1k']:.1f} correct/1k")
+        if rstats.get("reasoning_effort_scaling") is not None:
+            parts.append(f"effort {rstats['reasoning_effort_scaling']:.2f}×")
+        out.append(f"  {_pad('reasoning', _LABEL_W)} {' · '.join(parts)}")
     out.append(f"  {_pad('calls', _LABEL_W)} {rstats['n_calls']:,}"
                + (paint.fg(f"  · {rstats['errored']} errored", _RAMP[0])
                   if rstats["errored"] else paint.dim("  · 0 errored")))

@@ -6,7 +6,9 @@ llama.cpp, TGI). Set base_url + model + api_key.
 An optional native Anthropic Messages API streaming path is triggered when the
 resolved provider carries the `native_anthropic` capability flag. It captures
 per-phase wall-clock timings from stream events and stores them alongside the
-response; the OpenAI-compatible path is otherwise unchanged.
+response; the OpenAI-compatible path is otherwise unchanged. Add the `oauth`
+capability to authenticate via a logged-in OAuth profile (`ant auth login` /
+Claude Code) instead of an API key.
 
 Samples are drawn one request at a time (client-side), not via the server's `n`
 parameter, because many local servers silently ignore `n` and return a single
@@ -23,6 +25,7 @@ import math
 import time
 import random
 import hashlib
+import subprocess
 import urllib.request
 import urllib.error
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -37,12 +40,35 @@ except Exception:                               # optional dependency
 
 SYSTEM = "You are a careful reasoning assistant. Work through each problem step by step."
 
+# OAuth on /v1/messages requires this beta header; the SDK does not add it itself.
+_OAUTH_BETA = "oauth-2025-04-20"
+
 # raw/parsed/correct/confidence/latency/prompt_tokens/completion_tokens
 _ERROR_ROW = (storage.ERROR_MARKER, None, None, None, 0, None, None, None)
 
-# errors worth retrying: transport problems and malformed/oddly-shaped responses
+# errors worth retrying: transport problems and malformed/oddly-shaped responses.
+# The native Anthropic path raises the SDK's own exception types (not urllib's), so
+# fold in its transient ones — rate limits (429), overloaded/5xx, dropped connections
+# (APITimeoutError subclasses APIConnectionError) — but never 4xx like BadRequest,
+# which would only fail again.
+_RETRYABLE_ANTHROPIC = (
+    (anthropic.RateLimitError, anthropic.InternalServerError,
+     anthropic.APIConnectionError) if anthropic is not None else ())
 _RETRYABLE = (urllib.error.URLError, urllib.error.HTTPError, TimeoutError,
-              OSError, ValueError, json.JSONDecodeError)
+              OSError, ValueError, json.JSONDecodeError) + _RETRYABLE_ANTHROPIC
+
+
+def _retry_backoff(err, attempt):
+    """Seconds to wait before the next retry. Honor a server-sent Retry-After header
+    when present (rate limits / overload give a real reset hint), capped so a stuck
+    window can't stall the run; otherwise fall back to capped exponential backoff."""
+    resp = getattr(err, "response", None)
+    if resp is not None:
+        try:
+            return min(float(resp.headers.get("retry-after")), 60)
+        except (TypeError, ValueError):
+            pass
+    return min(2 ** attempt, 8)
 
 
 def _provider_has_capability(cfg, name):
@@ -179,23 +205,39 @@ def _parse_anthropic_stream(stream):
     return text, prompt_tokens, completion_tokens, timings, think_tokens
 
 
-def call_anthropic(api_key, model, messages, temperature, max_tokens, timeout):
+def call_anthropic(api_key, model, messages, temperature, max_tokens, timeout,
+                   oauth=False):
     """One native Anthropic streaming completion.
 
     Returns (text, prompt_tokens, completion_tokens, timings, think_tokens).
     Raises ValueError if the response is unusable.
+
+    With oauth=True the client is built with no API key, so the SDK resolves the
+    logged-in OAuth profile (`ant auth login` / Claude Code) and refreshes it
+    automatically; the `anthropic-beta: oauth-2025-04-20` header that OAuth
+    requires on /v1/messages is added explicitly. A set $ANTHROPIC_API_KEY in the
+    environment outranks the profile in the SDK — unset it to use OAuth.
     """
     if anthropic is None:
         raise ValueError("anthropic package is required for the native Anthropic path")
 
     system, anthropic_messages = _to_anthropic_messages(messages)
-    client = anthropic.Anthropic(api_key=api_key, timeout=timeout)
+    if oauth:
+        try:
+            client = anthropic.Anthropic(
+                timeout=timeout, default_headers={"anthropic-beta": _OAUTH_BETA})
+        except anthropic.AnthropicError as e:    # no resolvable OAuth credential
+            raise ValueError(
+                f"no Anthropic OAuth credential found -- run `ant auth login` "
+                f"(or set $ANTHROPIC_AUTH_TOKEN): {e}")
+    else:
+        client = anthropic.Anthropic(api_key=api_key, timeout=timeout)
+    # messages.stream() streams implicitly (no `stream` kwarg), and adaptive-thinking
+    # models (Opus 4.8, Sonnet 4.6) reject `temperature` with a 400 — so neither is sent.
     params = {
         "model": model,
         "max_tokens": max_tokens,
         "messages": anthropic_messages,
-        "temperature": temperature,
-        "stream": True,
         "thinking": {"type": "adaptive", "display": "omitted"},
     }
     if system:
@@ -207,6 +249,69 @@ def call_anthropic(api_key, model, messages, temperature, max_tokens, timeout):
     if not text:
         raise ValueError("Anthropic stream produced no text content")
     return text, pt, ct, timings, think_tokens
+
+
+# A model invocation that fails partway (rate limit, overload) but is worth retrying.
+# Subclasses ValueError so it lands in _RETRYABLE alongside the SDK/transport errors.
+class ClaudeCliRetryable(ValueError):
+    pass
+
+
+def call_claude_cli(model, messages, timeout):
+    """One completion via the Claude Code CLI (`claude -p`) instead of the HTTP API.
+
+    Routes through the CLI's own subscription/OAuth path, which the raw /v1/messages
+    OAuth token is rate-limited far more aggressively than. Returns
+    (text, prompt_tokens, completion_tokens, timings, think_tokens) like call_anthropic.
+
+    The bench's own system prompt replaces Claude Code's, and the dynamic
+    (workspace/tool) system-prompt sections are excluded so the model sees a clean
+    reasoning prompt rather than the coding-agent harness. Thinking-token counts are
+    not exposed on this path, so think_tokens is 0.
+    """
+    system, amsgs = _to_anthropic_messages(messages)
+    # claude -p takes a single prompt string. Single-turn items have one user message;
+    # multi-turn conversations are flattened with role labels so history survives.
+    if len(amsgs) == 1:
+        prompt = amsgs[0]["content"]
+    else:
+        prompt = "\n\n".join(f"{m['role'].upper()}: {m['content']}" for m in amsgs)
+
+    cmd = ["claude", "-p", prompt, "--model", model,
+           "--output-format", "json", "--exclude-dynamic-system-prompt-sections"]
+    if system:
+        cmd += ["--system-prompt", system]
+
+    t0 = time.time()
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              stdin=subprocess.DEVNULL, timeout=timeout)
+    except subprocess.TimeoutExpired as e:
+        raise TimeoutError(f"claude -p timed out after {timeout}s") from e
+    total = time.time() - t0
+
+    if proc.returncode != 0:
+        raise ClaudeCliRetryable(
+            f"claude -p exited {proc.returncode}: {(proc.stderr or '').strip()[:300]}")
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"claude -p returned non-JSON output: {proc.stdout[:300]}") from e
+
+    if data.get("is_error") or data.get("api_error_status"):
+        raise ClaudeCliRetryable(
+            f"claude -p API error: {data.get('api_error_status') or data.get('subtype')}")
+
+    text = (data.get("result") or "").strip()
+    if not text:
+        raise ValueError("claude -p produced no result text")
+
+    usage = data.get("usage") or {}
+    pt = usage.get("input_tokens")
+    ct = usage.get("output_tokens")
+    ttft = (data.get("ttft_ms") or 0) / 1000 or None
+    timings = {"ttft": ttft, "first_reasoning": ttft, "answer_wall": ttft, "total": total}
+    return text, pt, ct, timings, 0
 
 
 def token_entropy_stats(content):
@@ -248,9 +353,13 @@ def token_entropy_stats(content):
 
 def call_api(base_url, api_key, model, messages, temperature, max_tokens, timeout,
              want_logprobs=False):
-    """One completion. Returns (text, prompt_tokens, completion_tokens, logprob_stats).
-    logprob_stats is None unless want_logprobs and the server returns logprobs.
-    Raises ValueError if the response is not shaped like a chat completion."""
+    """One completion. Returns
+    (text, prompt_tokens, completion_tokens, reasoning_tokens, logprob_stats).
+    reasoning_tokens is the provider's own hidden-reasoning count from
+    usage.completion_tokens_details.reasoning_tokens (o1/o3/DeepSeek-style), or
+    None when the provider doesn't expose it. logprob_stats is None unless
+    want_logprobs and the server returns logprobs. Raises ValueError if the
+    response is not shaped like a chat completion."""
     url = base_url.rstrip("/") + "/chat/completions"
     payload = {"model": model, "messages": messages,
                "temperature": temperature, "max_tokens": max_tokens}
@@ -270,13 +379,24 @@ def call_api(base_url, api_key, model, messages, temperature, max_tokens, timeou
         raise ValueError(f"response has no choices: {str(body)[:200]}")
     text = (choices[0].get("message") or {}).get("content")
     if text is None:
+        # Reasoning models spend completion tokens on hidden reasoning first; if
+        # max_tokens runs out before any content, finish_reason is "length" and
+        # content is null. Name the real cause so the fix (raise max_tokens) is clear.
+        if choices[0].get("finish_reason") == "length":
+            raise ValueError(
+                "response truncated at the token cap before any content "
+                f"(finish_reason=length, max_tokens={max_tokens}); raise --max-tokens "
+                "— reasoning models need more budget to emit an answer.")
         raise ValueError("response choice missing message.content")
     usage = body.get("usage") or {}
+    details = usage.get("completion_tokens_details") or {}
+    reasoning_tokens = details.get("reasoning_tokens")
     logprob_stats = None
     if want_logprobs:
         content = (choices[0].get("logprobs") or {}).get("content")
         logprob_stats = token_entropy_stats(content)
-    return text, usage.get("prompt_tokens"), usage.get("completion_tokens"), logprob_stats
+    return (text, usage.get("prompt_tokens"), usage.get("completion_tokens"),
+            reasoning_tokens, logprob_stats)
 
 
 def _mock_seed(item_id, sample_idx):
@@ -342,16 +462,22 @@ def _call_turn(messages, item, cfg, sample_idx, turn_idx):
     """One model call for a single turn. Returns (text, ptok, ctok, telemetry)."""
     if cfg.get("mock"):
         return mock_turn(item, sample_idx, turn_idx, cfg["mock"]), None, None, None
+    if _provider_has_capability(cfg, "claude_cli"):
+        text, pt, ct, timings, think = call_claude_cli(
+            cfg["model"], messages, cfg["timeout"])
+        return text, pt, ct, _build_telemetry(cfg, pt, ct, timings, think, text)
     if _provider_has_capability(cfg, "native_anthropic"):
         text, pt, ct, timings, think = call_anthropic(
             cfg["api_key"], cfg["model"], messages,
-            cfg["temperature"], cfg["max_tokens"], cfg["timeout"])
+            cfg["temperature"], cfg["max_tokens"], cfg["timeout"],
+            oauth=_provider_has_capability(cfg, "oauth"))
         return text, pt, ct, _build_telemetry(cfg, pt, ct, timings, think, text)
-    text, pt, ct, lp = call_api(
+    text, pt, ct, rt, lp = call_api(
         cfg["base_url"], cfg["api_key"], cfg["model"], messages,
         cfg["temperature"], cfg["max_tokens"], cfg["timeout"],
         want_logprobs=_provider_has_capability(cfg, "logprobs"))
-    telemetry = _build_telemetry(cfg, pt, ct, None, 0, text, logprob_stats=lp) if lp else None
+    telemetry = (_build_telemetry(cfg, pt, ct, None, rt or 0, text, logprob_stats=lp)
+                 if (lp or rt) else None)
     return text, pt, ct, telemetry
 
 
@@ -377,7 +503,7 @@ def _sequential_completion(item, cfg, sample_idx):
         except _RETRYABLE as e:
             last_err = e
             if attempt < cfg["retries"]:
-                time.sleep(min(2 ** attempt, 8))
+                time.sleep(_retry_backoff(e, attempt))
     return None, None, None, None, last_err, None
 
 
@@ -393,27 +519,35 @@ def _one_completion(item, cfg, sample_idx):
                 text, pt, ct = mock_one(item, sample_idx, cfg["mock"])
                 telemetry = _build_telemetry(cfg, pt, ct, None, 0, text)
                 return text, pt, ct, telemetry, None, None
+            elif _provider_has_capability(cfg, "claude_cli"):
+                text, pt, ct, timings, think_tokens = call_claude_cli(
+                    cfg["model"], build_messages(item, cfg["ask_confidence"]),
+                    cfg["timeout"])
+                telemetry = _build_telemetry(cfg, pt, ct, timings, think_tokens, text)
+                return text, pt, ct, telemetry, None, None
             elif _provider_has_capability(cfg, "native_anthropic"):
                 text, pt, ct, timings, think_tokens = call_anthropic(
                     cfg["api_key"], cfg["model"],
                     build_messages(item, cfg["ask_confidence"]),
-                    cfg["temperature"], cfg["max_tokens"], cfg["timeout"])
+                    cfg["temperature"], cfg["max_tokens"], cfg["timeout"],
+                    oauth=_provider_has_capability(cfg, "oauth"))
                 telemetry = _build_telemetry(cfg, pt, ct, timings, think_tokens, text)
                 return text, pt, ct, telemetry, None, None
             else:
-                text, pt, ct, lp = call_api(
+                text, pt, ct, rt, lp = call_api(
                     cfg["base_url"], cfg["api_key"], cfg["model"],
                     build_messages(item, cfg["ask_confidence"]),
                     cfg["temperature"], cfg["max_tokens"], cfg["timeout"],
                     want_logprobs=_provider_has_capability(cfg, "logprobs"))
-                # OpenAI-compat: no stream timings; logprob entropy when available.
-                telemetry = _build_telemetry(cfg, pt, ct, None, 0, text,
-                                             logprob_stats=lp) if lp else None
+                # OpenAI-compat: no stream timings; reasoning-token count and
+                # logprob entropy are captured when the provider exposes them.
+                telemetry = (_build_telemetry(cfg, pt, ct, None, rt or 0, text,
+                                              logprob_stats=lp) if (lp or rt) else None)
                 return text, pt, ct, telemetry, None, None
         except _RETRYABLE as e:
             last_err = e
             if attempt < cfg["retries"]:
-                time.sleep(min(2 ** attempt, 8))
+                time.sleep(_retry_backoff(e, attempt))
     return None, None, None, None, last_err, None
 
 
@@ -499,8 +633,14 @@ def _build_telemetry(cfg, prompt_tokens, completion_tokens, timings, think_token
     }
 
 def _process(item, cfg):
-    """Run all samples for one item. Returns (item_id, rows, telemetry_list, err_summary)."""
+    """Run all samples for one item.
+
+    Returns (item_id, rows, telemetry_list, err_summary, solved). `solved` is
+    True when no sample errored and a majority of the item's samples graded
+    correct (for the common n=1 case, simply whether the one answer was right).
+    """
     rows, telemetry_list, last_err = [], [], None
+    n_correct = 0
     choices = item["choices"].split("|") if item.get("choices") else None
     for s in range(cfg["n"]):
         t0 = time.time()
@@ -514,6 +654,7 @@ def _process(item, cfg):
             telemetry_list.append((item["item_id"], s, telemetry))
         parsed, correct, conf, parse_source = grading.grade(
             text, item["answer_type"], item["gold"], choices)
+        n_correct += 1 if correct else 0
         metadata = {"parse_source": parse_source}
         # Genuine multi-turn: grade the committed turn-1 reply against the subgold so
         # metrics can separate "got the pre-pivot value" from "revised correctly".
@@ -523,7 +664,8 @@ def _process(item, cfg):
             metadata["intermediate_correct"] = bool(icorrect)
             metadata["intermediate_parsed"] = iparsed
         rows.append((text, parsed, correct, conf, latency, ptok, ctok, metadata))
-    return item["item_id"], rows, telemetry_list, (str(last_err) if last_err else None)
+    solved = last_err is None and n_correct * 2 > cfg["n"]
+    return item["item_id"], rows, telemetry_list, (str(last_err) if last_err else None), solved
 
 
 
@@ -540,8 +682,9 @@ class _Progress:
     """Dependency-free live progress for a run.
 
     On a TTY it repaints one line in place (carriage return) with a bar,
-    percentage, item counts, throughput and ETA. When output is redirected
-    (no TTY) it instead emits a plain line every ~5% so logs stay readable.
+    percentage, solved/wrong/error counts, a live accuracy estimate,
+    throughput and ETA. When output is redirected (no TTY) it instead emits
+    a plain line every ~5% so logs stay readable.
     """
 
     def __init__(self, total, stream=None, width=28):
@@ -553,7 +696,19 @@ class _Progress:
         self._last_paint = 0.0
         self._step = max(1, self.total // 20)            # ~5% cadence when redirected
 
-    def update(self, done, ok, err):
+    def _c(self, text, code):
+        """Wrap `text` in an ANSI color on a TTY; return it unchanged otherwise."""
+        return f"\033[{code}m{text}\033[0m" if self.tty else text
+
+    def _counts(self, done, solved, err):
+        """Solved/wrong/error counts plus a live accuracy estimate (errors excluded)."""
+        wrong = max(done - solved - err, 0)
+        answered = solved + wrong
+        acc = f"{solved / answered * 100:.0f}%" if answered else "--"
+        err_s = self._c(f"err={err}", 31) if err else f"err={err}"
+        return f"{self._c(f'✓{solved}', 32)} {self._c(f'✗{wrong}', 33)} {err_s}  acc={acc}"
+
+    def update(self, done, solved, err):
         now = time.time()
         final = done >= self.total
         if self.tty:
@@ -567,7 +722,7 @@ class _Progress:
         rate = done / elapsed if elapsed > 0 else 0.0
         eta = (self.total - done) / rate if rate > 0 and not final else 0.0
         frac = done / self.total
-        stats = (f"{done}/{self.total}  ok={ok} err={err}  "
+        stats = (f"{done}/{self.total}  {self._counts(done, solved, err)}  "
                  f"{rate:4.1f} it/s  ETA {_fmt_dur(eta)}")
         if self.tty:
             filled = int(self.width * frac)
@@ -577,15 +732,17 @@ class _Progress:
             self.stream.write(f"  {frac * 100:5.1f}%  {stats}\n")
         self.stream.flush()
 
-    def finish(self, ok, err):
+    def finish(self, solved, err):
         elapsed = time.time() - self.start
         rate = self.total / elapsed if elapsed > 0 else 0.0
         if self.tty:
             self.stream.write("\n")
-        tail = f", {err} errored" if err else ""
+        wrong = max(self.total - solved - err, 0)
+        answered = solved + wrong
+        acc = f"{solved / answered * 100:.1f}%" if answered else "--"
         self.stream.write(
-            f"done in {_fmt_dur(elapsed)}  ({self.total} items, {ok} ok{tail}, "
-            f"{rate:.1f} it/s)\n")
+            f"done in {_fmt_dur(elapsed)}  ({self.total} items: {solved} solved, "
+            f"{wrong} wrong, {err} errored)  acc={acc}  {rate:.1f} it/s\n")
         self.stream.flush()
 
 
@@ -601,26 +758,28 @@ def run(con, run_id, items, cfg):
               "to re-run, or change --run-id).")
         return
 
-    n_done = n_ok = n_err = 0
+    n_done = n_solved = n_err = 0
     prog = _Progress(total)
     prog.update(0, 0, 0)
     with ThreadPoolExecutor(max_workers=cfg["workers"]) as ex:
         futs = {ex.submit(_process, it, cfg): it for it in todo}
         for fut in as_completed(futs):
             try:
-                item_id, rows, telemetry_list, err = fut.result()
+                item_id, rows, telemetry_list, err, solved = fut.result()
             except Exception as e:                       # never let one item abort the run
-                item_id, rows, telemetry_list, err = futs[fut]["item_id"], [_ERROR_ROW], [], str(e)
+                item_id, rows, telemetry_list, err, solved = futs[fut]["item_id"], [_ERROR_ROW], [], str(e), False
             for item_id_t, s, telemetry in telemetry_list:
                 storage.save_telemetry(con, run_id, item_id_t, s, **telemetry)
             for i, (raw, parsed, correct, conf, lat, pt, ct, meta) in enumerate(rows):
                 storage.save_response(con, run_id, item_id, i, raw, parsed, correct, conf, lat, pt, ct,
                                     metadata=meta)
             n_done += 1
-            n_err += err is not None
-            n_ok += err is None
+            if err is not None:
+                n_err += 1
+            elif solved:
+                n_solved += 1
             if n_done % 25 == 0 or n_done == total:
                 con.commit()
-            prog.update(n_done, n_ok, n_err)
+            prog.update(n_done, n_solved, n_err)
     con.commit()
-    prog.finish(n_ok, n_err)
+    prog.finish(n_solved, n_err)

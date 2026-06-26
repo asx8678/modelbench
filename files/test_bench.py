@@ -745,6 +745,79 @@ def test_composed_early_slip_changes_a_later_operation():
     assert amplified > 0, "an early parity slip never amplified into an operator change"
 
 
+# ------------------------------------------------- planning_blocksworld (bench-6s8)
+def test_blocksworld_builds_and_verifies_and_scales():
+    # build_dataset(verify=True) raises if any optimal-move gold fails re-derivation.
+    ds = generators.build_dataset(["planning_blocksworld"], 1, 6, 4, verify=True)
+    assert ds and all(generators.verify_gold(p) for p in ds)
+    assert max(p.difficulty for p in ds) == 4              # FAMILY_MAX_DIFF cap (n=6 blocks)
+    # difficulty scales the block count: n = difficulty + 2.
+    small = generators._mk("planning_blocksworld", 1, 0, 0, False, "base", "g")
+    big = generators._mk("planning_blocksworld", 4, 0, 0, False, "base", "g")
+    n_small = len({b for s in generators._bw_parse_config(
+        re.search(r"Initial configuration:(.*?)Goal", small.prompt, re.S).group(1)) for b in s})
+    n_big = len({b for s in generators._bw_parse_config(
+        re.search(r"Initial configuration:(.*?)Goal", big.prompt, re.S).group(1)) for b in s})
+    assert n_small == 3 and n_big == 6
+
+
+def test_blocksworld_solver_hand_checked():
+    # A: two singletons -> stack one on the other == 1 move.
+    assert generators._bw_min_moves([["A"], ["B"]], [["A", "B"]]) == 1
+    # B: three singletons -> a 3-stack needs 2 moves (B onto A, C onto B).
+    assert generators._bw_min_moves([["A"], ["B"], ["C"]], [["A", "B", "C"]]) == 2
+    # C: a deadlock inversion (A on B  ->  B on A) needs 2 moves (A to table, B onto A).
+    assert generators._bw_min_moves([["B", "A"]], [["A", "B"]]) == 2
+    # identical configuration costs nothing.
+    assert generators._bw_min_moves([["A", "B"]], [["A", "B"]]) == 0
+
+
+def test_blocksworld_gold_is_optimal_not_just_an_upper_bound():
+    # The verifier re-runs BFS, so a corrupted (non-minimal) gold must fail.
+    p = generators._mk("planning_blocksworld", 3, 7, 0, False, "base", "g")
+    assert generators.verify_gold(p) is True
+    assert generators.verify_gold(dataclasses.replace(p, gold=str(int(p.gold) + 1))) is False
+    assert int(p.gold) >= 1                                # goal differs from initial
+
+
+# ------------------------------------------------- theory_of_mind (bench-6s8)
+def test_theory_of_mind_builds_and_verifies():
+    ds = generators.build_dataset(["theory_of_mind"], 1, 6, 4, verify=True)
+    assert ds and all(generators.verify_gold(p) for p in ds)
+    for p in ds:
+        assert p.answer_type == "choice" and p.gold in p.choices
+
+
+def test_theory_of_mind_belief_tracking_hand_checked():
+    # Classic Sally-Anne: object in the basket; Sally leaves, Anne moves it to the
+    # box, Sally returns.
+    events = [("leave", "Sally"),
+              ("move", "Anne", "the basket", "the box"),
+              ("enter", "Sally")]
+    agents = ["Sally", "Anne"]
+    # 1st order: Sally never saw the move -> she looks in the basket (false belief).
+    assert generators._tom_belief("the basket", events, ["Sally"], agents) == "the basket"
+    # 2nd order: Anne thinks Sally will look in the basket (Anne knows Sally was away).
+    assert generators._tom_belief("the basket", events, ["Anne", "Sally"], agents) == "the basket"
+    # Anne herself saw the move -> she knows it is in the box (true belief).
+    assert generators._tom_belief("the basket", events, ["Anne"], agents) == "the box"
+
+
+def test_theory_of_mind_false_belief_is_load_bearing():
+    # The queried belief always differs from the TRUE final location, so a solver
+    # that just reports where the object actually is must be wrong.
+    fooled = 0
+    for diff in range(1, 7):
+        for seed in range(20):
+            p = generators._mk("theory_of_mind", diff, seed, 0, False, "base", "g")
+            # true final location = destination of the last move in the prompt.
+            moves = re.findall(r"moves the \w+ from .+? to (.+?)\.", p.prompt)
+            true_loc = moves[-1]
+            if true_loc != p.gold:                        # gold is the (false) belief
+                fooled += 1
+    assert fooled > 0, "theory-of-mind belief never diverged from the true location"
+
+
 # ------------------------------------------------------------------ grading (#1)
 def test_confidence_value_not_used_as_answer():
     # The dangerous case: confidence equals gold and the model gave no numeric
@@ -971,6 +1044,12 @@ def test_baseline_metrics_unchanged():
                 # bench-xg3 adds the unsat_localize family (justification
                 # localization, justified_choice answer_type).
                 top.pop("unsat_localize", None)
+                # bench-6s8 adds the planning_blocksworld and theory_of_mind
+                # families, absent from the baseline fixture.
+                top.pop("planning_blocksworld", None)
+                top.pop("theory_of_mind", None)
+                # bench-9lv adds the code_output (SWE-lite) family.
+                top.pop("code_output", None)
         return out
 
     assert json.dumps(per_family(res), sort_keys=True, indent=2) == \
@@ -1109,6 +1188,84 @@ def test_resolve_unknown_provider_raises():
         providers.resolve(_REG, "x", "nope", None, None)
 
 
+_OAUTH_REG = {
+    "providers": {
+        "anthropic": {"base_url": "https://api.anthropic.com/v1",
+                      "capabilities": ["native_anthropic", "oauth"]},
+    },
+    "models": {"claude-opus": {"provider": "anthropic", "model": "claude-opus-4-8"}},
+}
+
+
+def test_resolve_oauth_provider_needs_no_key(monkeypatch):
+    # An OAuth provider resolves to an empty key (the SDK uses the logged-in
+    # profile) and must NOT pick up a stray $OPENAI_API_KEY.
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-should-be-ignored")
+    ep = providers.resolve(_OAUTH_REG, "claude-opus")
+    assert ep["api_key"] == ""
+    assert "oauth" in ep["capabilities"]
+
+
+def test_call_anthropic_oauth_uses_profile_and_beta_header(monkeypatch):
+    # oauth=True builds the client with no api_key (SDK resolves the profile)
+    # and adds the OAuth beta header that /v1/messages requires.
+    captured = {}
+
+    class _FakeStream:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    class _FakeClient:
+        def __init__(self, **kw):
+            captured.update(kw)
+            self.messages = self
+        def stream(self, **params):
+            captured["params"] = params
+            return _FakeStream()
+
+    fake = type("M", (), {"Anthropic": _FakeClient, "AnthropicError": Exception})
+    monkeypatch.setattr(runner, "anthropic", fake)
+    monkeypatch.setattr(runner, "_parse_anthropic_stream",
+                        lambda s: ("ANSWER: 42", 5, 7, {}, 0))
+
+    text, *_ = runner.call_anthropic(
+        api_key="", model="claude-opus-4-8",
+        messages=[{"role": "user", "content": "hi"}],
+        temperature=0, max_tokens=64, timeout=30, oauth=True)
+
+    assert text == "ANSWER: 42"
+    assert "api_key" not in captured            # profile-based, no key injected
+    assert captured["default_headers"]["anthropic-beta"] == runner._OAUTH_BETA
+
+
+def test_call_anthropic_api_key_path_passes_key(monkeypatch):
+    captured = {}
+
+    class _FakeStream:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    class _FakeClient:
+        def __init__(self, **kw):
+            captured.update(kw)
+            self.messages = self
+        def stream(self, **params):
+            return _FakeStream()
+
+    fake = type("M", (), {"Anthropic": _FakeClient, "AnthropicError": Exception})
+    monkeypatch.setattr(runner, "anthropic", fake)
+    monkeypatch.setattr(runner, "_parse_anthropic_stream",
+                        lambda s: ("ANSWER: 42", 5, 7, {}, 0))
+
+    runner.call_anthropic(
+        api_key="sk-real", model="claude-opus-4-8",
+        messages=[{"role": "user", "content": "hi"}],
+        temperature=0, max_tokens=64, timeout=30)
+
+    assert captured["api_key"] == "sk-real"
+    assert "default_headers" not in captured
+
+
 def test_shipped_providers_json_is_valid():
     reg = providers.load()                 # the real providers.json next to the code
     assert reg["providers"] and reg["models"]
@@ -1192,3 +1349,52 @@ def test_logprob_telemetry_end_to_end(monkeypatch):
     assert tel["logprob_divergence_spikes"] == 1            # the '7' token at logprob -3.0
     # and the unobservable fields are honestly annotated, not faked
     assert tel["unobservable_fields"].get("tot_branch_map") == "unobservable_without_raw_cot"
+
+
+# ------------------------------------------------- code_output (bench-9lv)
+def test_code_output_builds_and_verifies():
+    # build_dataset(verify=True) raises if any gold fails independent re-derivation.
+    ds = generators.build_dataset(["code_output"], 1, 6, 4, verify=True)
+    assert ds and all(generators.verify_gold(p) for p in ds)
+    assert all(p.answer_type == "int" for p in ds)
+
+
+def test_code_output_determinism():
+    # Prompt, gold, and item_id must be byte-stable across two identical builds.
+    a = generators.build_dataset(["code_output"], 1, 5, 4, verify=False)
+    b = generators.build_dataset(["code_output"], 1, 5, 4, verify=False)
+    assert [(p.item_id, p.gold, p.prompt) for p in a] == \
+           [(p.item_id, p.gold, p.prompt) for p in b]
+
+
+def test_code_output_verifier_hand_checked():
+    # (1) Single loop accumulator: f(n=4, k=3) -> 0*3+1*3+2*3+3*3 = 18
+    loop_src = (
+        "def f(n, k):\n"
+        "    total = 0\n"
+        "    for i in range(n):\n"
+        "        total = total + i * k\n"
+        "    return total"
+    )
+    prompt1 = (
+        "What value does the following Python function return when called as shown?\n\n"
+        + loop_src + "\n\nCall: f(4, 3)"
+    )
+    assert generators._verify_code_output(prompt1, "18") is True
+    assert generators._verify_code_output(prompt1, "17") is False
+
+    # (2) Nested loop: f(n=3, m=2) -> sum(i+j for i in range(3) for j in range(2)) = 9
+    nested_src = (
+        "def f(n, m):\n"
+        "    total = 0\n"
+        "    for i in range(n):\n"
+        "        for j in range(m):\n"
+        "            total = total + i + j\n"
+        "    return total"
+    )
+    prompt2 = (
+        "What value does the following Python function return when called as shown?\n\n"
+        + nested_src + "\n\nCall: f(3, 2)"
+    )
+    assert generators._verify_code_output(prompt2, "9") is True
+    assert generators._verify_code_output(prompt2, "8") is False

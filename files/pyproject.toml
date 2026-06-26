@@ -6,8 +6,10 @@ requires-python = ">=3.9"
 dependencies = [
     "numpy>=1.24",       # metrics
     "matplotlib>=3.7",   # report charts only (imported lazily by report.py)
+    "anthropic>=0.40",   # native Anthropic path (OAuth + Messages streaming); imported lazily
 ]
-# The runner, generators, grading, storage, and dashboard use only the standard library.
+# The runner, generators, grading, storage, and dashboard otherwise use only the standard
+# library (the runner guards its `anthropic` import, so it still runs without the package).
 
 [dependency-groups]
 dev = [

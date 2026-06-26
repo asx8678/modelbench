@@ -5,6 +5,16 @@
 .beads-credential-key
 .venv/
 .venv*/
+
+# Local model/endpoint config — holds real API keys; never commit it.
+# See files/providers.example.json for the structure.
+files/providers.json
+# Per-run reports and exported results (generated locally)
+files/report/
+files/results/
+
+# macOS
+.DS_Store
 __pycache__/
 *.pyc
 *.pyo

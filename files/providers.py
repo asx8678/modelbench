@@ -14,9 +14,11 @@ $BENCH_PROVIDERS env var). It has two maps:
   * context_window / max_tokens are metadata; max_tokens, if set, becomes the
     default completion budget for that model.
   * a provider may carry a "capabilities" list. "native_anthropic" selects the
-    native streaming path; "logprobs" requests per-token logprobs (OpenAI-compatible
-    open-weights servers like vLLM/TGI) so token-entropy telemetry is collected.
-    See telemetry_schema.json for the emitted TelemetryPayload.
+    native streaming path; "oauth" (Anthropic only) authenticates via a logged-in
+    OAuth profile (`ant auth login` / Claude Code) instead of a key, so no
+    api_key/api_key_env is needed; "logprobs" requests per-token logprobs
+    (OpenAI-compatible open-weights servers like vLLM/TGI) so token-entropy
+    telemetry is collected. See telemetry_schema.json for the emitted TelemetryPayload.
 
 Nothing here is mandatory: `run --base-url ... --model <raw id>` still works with
 no config file at all, and a raw model id with no provider falls back to a local
@@ -57,6 +59,8 @@ def _resolve_key(prov: dict, cli_key) -> str:
         return os.environ[env]
     if prov.get("api_key"):
         return prov["api_key"]
+    if "oauth" in (prov.get("capabilities") or []):
+        return ""                # OAuth: the SDK resolves the logged-in profile
     return os.environ.get("OPENAI_API_KEY", "")
 
 
@@ -167,6 +171,71 @@ def _unique_provider_name(base, existing) -> str:
     while f"{base}{i}" in existing:
         i += 1
     return f"{base}{i}"
+
+
+def delete_model(reg, alias):
+    """Remove a model alias from the registry.
+
+    Also prunes the model's provider when no remaining model references it —
+    the inverse of register_model auto-creating one provider per endpoint.
+    Returns (removed, pruned_provider): `removed` is False when the alias was
+    not present; `pruned_provider` is the dropped provider name, or None.
+    Mutates `reg`.
+    """
+    models = reg.setdefault("models", {})
+    provs = reg.setdefault("providers", {})
+    entry = models.pop(alias, None)
+    if entry is None:
+        return False, None
+    prov_name = entry.get("provider")
+    if prov_name and not any(m.get("provider") == prov_name for m in models.values()):
+        if provs.pop(prov_name, None) is not None:
+            return True, prov_name
+    return True, None
+
+
+def edit_model(reg, alias, *, base_url=None, model_id=None, api_key=None,
+               api_key_env=None, context_window=None, max_tokens=None):
+    """Update an existing model alias in place.
+
+    Only the fields you pass change; everything left as None keeps its current
+    value (the endpoint and key are read back from the model's current
+    provider). Re-points the model at the right provider for `base_url` — reusing
+    or creating one exactly as register_model does — and prunes the old provider
+    when the endpoint moved and nothing else still references it.
+
+    Returns (reg, provider_name). Raises KeyError if `alias` is unknown.
+    """
+    models = reg.setdefault("models", {})
+    if alias not in models:
+        raise KeyError(alias)
+    cur = models[alias]
+    cur_prov = reg.get("providers", {}).get(cur.get("provider"), {})
+
+    # fall back to the current value for anything the caller didn't change
+    if base_url is None:
+        base_url = cur_prov.get("base_url")
+    if model_id is None:
+        model_id = cur.get("model")
+    if context_window is None:
+        context_window = cur.get("context_window")
+    if max_tokens is None:
+        max_tokens = cur.get("max_tokens")
+    if api_key is None and api_key_env is None:          # keep the existing key reference
+        api_key = cur_prov.get("api_key")
+        api_key_env = cur_prov.get("api_key_env")
+
+    old_prov_name = cur.get("provider")
+    reg, prov_name = register_model(
+        reg, alias=alias, base_url=base_url, model_id=model_id,
+        api_key=api_key, api_key_env=api_key_env,
+        context_window=context_window, max_tokens=max_tokens)
+
+    # endpoint moved -> drop the old provider if it's now orphaned
+    if old_prov_name and old_prov_name != prov_name and not any(
+            m.get("provider") == old_prov_name for m in reg["models"].values()):
+        reg["providers"].pop(old_prov_name, None)
+    return reg, prov_name
 
 
 def save(reg, path=None) -> str:

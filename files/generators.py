@@ -36,6 +36,8 @@ ITEMS = ["apples", "pencils", "marbles", "coins", "stickers", "books",
 CONTAINERS = ["the red box", "the blue box", "the green box", "the wooden crate",
               "the metal tin", "the paper bag", "the glass jar", "the basket"]
 COLORS = ["red", "blue", "green", "yellow", "purple", "orange", "teal", "grey"]
+# Singular objects for the theory-of-mind (false-belief) family.
+OBJECTS = ["ball", "book", "key", "ring", "coin", "doll", "apple", "letter"]
 
 # adjective tuples: (comparative, antonym-comparative, superlative-high, superlative-low)
 REL = [
@@ -1505,6 +1507,277 @@ def gen_noise_haystack(difficulty, structure_seed, surface_seed, distractor):
     return prompt, gold, "int", None
 
 
+# ------------------------------------------------ 14. planning_blocksworld (planning)
+# A blocks-world planning task: given an initial stack configuration and a goal
+# configuration, find the MINIMUM number of single-block moves to reach the goal.
+# A move lifts one clear block (nothing on top) and places it on the table or on
+# another clear block. Optimal blocksworld planning is genuine search, but for the
+# small block counts here the true minimum is found by BFS over the (connected)
+# state graph -- so the gold is correct by construction and the verifier re-derives
+# it from the prompt text by re-running the same BFS. Difficulty scales the block
+# count (n = difficulty + 2).
+def _bw_canon(stacks):
+    """Canonical state: a frozenset of bottom->top tuples (table order is irrelevant)."""
+    return frozenset(tuple(s) for s in stacks if s)
+
+
+def _bw_random_config(rng, blocks):
+    """A random arrangement of `blocks` into stacks on the table."""
+    bs = blocks[:]
+    rng.shuffle(bs)
+    stacks = [[bs[0]]]
+    for b in bs[1:]:
+        if rng.random() < 0.5:
+            stacks.append([b])                          # new pile on the table
+        else:
+            stacks[rng.randrange(len(stacks))].append(b)  # stack on an existing pile
+    return stacks
+
+
+def _bw_neighbors(state):
+    """All canonical states reachable from `state` (a frozenset of tuples) in one move."""
+    stacks = [list(s) for s in state]
+    out, seen = [], set()
+    for i in range(len(stacks)):
+        top = stacks[i][-1]
+        rest = [list(x) for j, x in enumerate(stacks) if j != i]
+        rest.append(stacks[i][:-1])                     # the stack `top` came off of
+        rest = [x for x in rest if x]
+        cand = _bw_canon(rest + [[top]])                # place on the table
+        if cand != state and cand not in seen:
+            seen.add(cand); out.append(cand)
+        for j in range(len(rest)):                      # place on another clear block
+            placed = [list(x) for x in rest]
+            placed[j] = placed[j] + [top]
+            cand = _bw_canon(placed)
+            if cand != state and cand not in seen:
+                seen.add(cand); out.append(cand)
+    return out
+
+
+def _bw_min_moves(init, goal):
+    """Minimum number of single-block moves from `init` to `goal` (BFS, exact)."""
+    from collections import deque
+    init_c, goal_c = _bw_canon(init), _bw_canon(goal)
+    if init_c == goal_c:
+        return 0
+    seen = {init_c}
+    q = deque([(init_c, 0)])
+    while q:
+        st, d = q.popleft()
+        for nb in _bw_neighbors(st):
+            if nb == goal_c:
+                return d + 1
+            if nb not in seen:
+                seen.add(nb); q.append((nb, d + 1))
+    return None                                         # unreachable (never, graph is connected)
+
+
+def _bw_render(rng, stacks):
+    """English description of a configuration as a shuffled list of 'on' facts."""
+    lines = []
+    for s in stacks:
+        lines.append(f"{s[0]} is on the table.")
+        for i in range(1, len(s)):
+            lines.append(f"{s[i]} is on {s[i - 1]}.")
+    rng.shuffle(lines)                                  # order is irrelevant; scramble it
+    return " ".join(lines)
+
+
+def gen_planning_blocksworld(difficulty, structure_seed, surface_seed, distractor):
+    rs = _rng("bw-struct", difficulty, structure_seed)
+    n = difficulty + 2                                  # blocks: d1=3 .. (capped) d4=6
+    blocks = [chr(ord("A") + i) for i in range(n)]
+    init = _bw_random_config(rs, blocks)
+    goal = init
+    for _ in range(50):                                 # ensure goal != init (so moves >= 1)
+        cand = _bw_random_config(rs, blocks)
+        if _bw_canon(cand) != _bw_canon(init):
+            goal = cand
+            break
+    moves = _bw_min_moves(init, goal)
+    prompt = (
+        "You have a set of labelled blocks on a table. A move takes one block that "
+        "has nothing on top of it and places it either on the table or on top of "
+        "another block that has nothing on top of it.\n"
+        "Initial configuration: " + _bw_render(rs, init) + "\n"
+        "Goal configuration: " + _bw_render(rs, goal) + "\n"
+        "What is the minimum number of moves needed to reach the goal configuration "
+        "from the initial configuration?"
+    )
+    return prompt, str(moves), "int", None
+
+
+# ------------------------------------------------ 15. theory_of_mind (false belief)
+# A Sally-Anne style false-belief task. Agents are in a room with an object; some
+# leave and re-enter while the object is moved. Belief semantics (ToMi-style): a
+# nested belief chain "a1 thinks a2 thinks ... ak thinks the object is at L" tracks
+# a move's destination only when EVERY agent in the chain witnessed it (was present).
+# The outer believer always misses one move, so the queried belief is a FALSE belief
+# (differs from the true location). Difficulty scales the nesting depth (1st-order
+# "where will A look?" .. 3rd-order) and the number of moves.
+def _tom_belief(initial_loc, events, chain, agents):
+    present = set(agents)                               # everyone starts in the room
+    belief = initial_loc
+    for ev in events:
+        if ev[0] == "move":
+            if all(a in present for a in chain):        # the whole chain witnessed it
+                belief = ev[3]
+        elif ev[0] == "leave":
+            present.discard(ev[1])
+        else:                                           # enter
+            present.add(ev[1])
+    return belief
+
+
+def gen_theory_of_mind(difficulty, structure_seed, surface_seed, distractor):
+    rs = _rng("tom-struct", difficulty, structure_seed)
+    depth = min(3, (difficulty + 1) // 2)              # 1st-order at d1-2, then 2nd, 3rd
+    n_agents = depth + 1
+    agents = rs.sample(NAMES, n_agents)
+    locations = rs.sample(CONTAINERS, 3)
+    obj = "the " + rs.choice(OBJECTS)
+    chain = agents[:depth]                              # chain[0] = outermost believer
+    L0 = locations[0]
+
+    events, cur = [], L0
+    for _ in range(max(0, difficulty - 1)):            # noise moves everyone witnesses
+        nxt = rs.choice([l for l in locations if l != cur])
+        events.append(("move", rs.choice(agents), cur, nxt)); cur = nxt
+    # Outer believer leaves, a present agent secretly relocates the object, believer
+    # returns -> the queried belief stays at `cur` while the true location changes.
+    a1 = chain[0]
+    events.append(("leave", a1))
+    mover = rs.choice([a for a in agents if a != a1])
+    secret = rs.choice([l for l in locations if l != cur])
+    events.append(("move", mover, cur, secret))
+    events.append(("enter", a1))
+    gold = _tom_belief(L0, events, chain, agents)
+
+    intro = (agents[0] if n_agents == 1
+             else ", ".join(agents[:-1]) + " and " + agents[-1])
+    parts = [f"{intro} are in the room.", f"{obj.capitalize()} is in {L0}."]
+    for ev in events:
+        if ev[0] == "move":
+            parts.append(f"{ev[1]} moves {obj} from {ev[2]} to {ev[3]}.")
+        elif ev[0] == "leave":
+            parts.append(f"{ev[1]} leaves the room.")
+        else:
+            parts.append(f"{ev[1]} enters the room.")
+    if depth == 1:
+        question = f"Where will {chain[0]} look for {obj}?"
+    else:
+        mid = " ".join(f"{a} thinks" for a in chain[1:-1])
+        mid = (mid + " ") if mid else ""
+        question = f"Where does {chain[0]} think {mid}{chain[-1]} will look for {obj}?"
+    prompt = " ".join(parts) + " " + question
+    return prompt, gold, "choice", locations
+
+
+# ------------------------------------------------ 16. code_output (SWE-lite)
+# The model is shown a small deterministic Python function and a concrete call
+# and must predict the exact integer return value. Tests code/execution
+# reasoning without repos, Docker, or sandbox.
+# SECURITY: gold is computed by executing OUR OWN generated snippet in a
+# restricted namespace. The model's text output is NEVER executed; grading is
+# plain value comparison. answer_type is "int".
+
+_CO_BUILTINS = {"range": range}   # minimal safe namespace for generated programs
+
+
+def _co_exec(func_src, call_src):
+    """Execute a generated function and return the call result.
+    Only code we generated is ever executed here — never model output."""
+    globs = {"__builtins__": _CO_BUILTINS}
+    ns = {}
+    exec(func_src, globs, ns)                          # defines f in ns
+    return eval(call_src, globs, ns)                   # f is in ns (locals)
+
+
+def gen_code_output(difficulty, structure_seed, surface_seed, distractor):
+    """Code execution probe (SWE-lite): predict the integer return value of a
+    small deterministic Python function. Gold computed at generation time by
+    executing our own snippet in a restricted namespace. Difficulty scales
+    the number of operations / loop depth."""
+    rs = _rng("co-struct", difficulty, structure_seed)
+
+    if difficulty <= 2:
+        # Parameterized arithmetic: f(a, b) at d1; f(a, b, c) at d2.
+        # The running-variable trick (v = a; v = v op b; …) keeps the body
+        # readable without revealing the answer at a glance.
+        n_params = difficulty + 1
+        pnames = ["a", "b", "c"][:n_params]
+        args = [rs.randint(2, 8) for _ in pnames]
+
+        lines = [f"    v = {pnames[0]}"]
+        cur = args[0]
+        for idx in range(1, n_params):
+            op = rs.choice(["+", "-", "*"])
+            k = args[idx]
+            if op == "*":
+                k = min(k, 3); args[idx] = k          # cap multiplier to keep values small
+            if op == "-" and cur - k < 0:
+                op = "+"                               # prevent negatives
+            cur = cur + k if op == "+" else cur - k if op == "-" else cur * k
+            lines.append(f"    v = v {op} {pnames[idx]}")
+        lines.append("    return v")
+
+        sig = ", ".join(pnames)
+        func_src = f"def f({sig}):\n" + "\n".join(lines)
+        call_src = f"f({', '.join(str(a) for a in args)})"
+
+    elif difficulty <= 4:
+        # Single bounded for-loop; d3 uses a plain accumulator, d4 adds a
+        # modulo conditional so the model must track the branch per iteration.
+        n = rs.randint(4, 6 + difficulty)
+        k = rs.randint(2, 5)
+
+        if difficulty <= 3:
+            func_src = (
+                "def f(n, k):\n"
+                "    total = 0\n"
+                "    for i in range(n):\n"
+                "        total = total + i * k\n"
+                "    return total"
+            )
+            call_src = f"f({n}, {k})"
+        else:
+            m = rs.choice([2, 3])
+            func_src = (
+                "def f(n, k, m):\n"
+                "    total = 0\n"
+                "    for i in range(n):\n"
+                "        if i % m == 0:\n"
+                "            total = total + k\n"
+                "        else:\n"
+                "            total = total + i\n"
+                "    return total"
+            )
+            call_src = f"f({n}, {k}, {m})"
+
+    else:
+        # Nested loops: forces the model to track two loop indices simultaneously.
+        n = rs.randint(3, 5 + difficulty // 2)
+        m = rs.randint(2, 4)
+        func_src = (
+            "def f(n, m):\n"
+            "    total = 0\n"
+            "    for i in range(n):\n"
+            "        for j in range(m):\n"
+            "            total = total + i + j\n"
+            "    return total"
+        )
+        call_src = f"f({n}, {m})"
+
+    gold = str(_co_exec(func_src, call_src))
+    prompt = (
+        "What value does the following Python function return when called as shown?\n\n"
+        + func_src + "\n\n"
+        "Call: " + call_src
+    )
+    return prompt, gold, "int", None
+
+
 GENERATORS = {
     "arithmetic": gen_arithmetic,
     "state_tracking": gen_state,
@@ -1521,6 +1794,9 @@ GENERATORS = {
     "dynamic_pivot": gen_dynamic_pivot,
     "false_lemma": gen_false_lemma,
     "noise_haystack": gen_noise_haystack,
+    "planning_blocksworld": gen_planning_blocksworld,
+    "theory_of_mind": gen_theory_of_mind,
+    "code_output": gen_code_output,
 }
 SUPPORTS_DISTRACTOR = {"arithmetic", "state_tracking", "ordering", "retroactive_edit",
                        "redefined_ops"}
@@ -1541,8 +1817,10 @@ REQUIRES_SEQUENTIAL_TURNS = {"dynamic_pivot"}
 # the gold-verification search (the CSP families). Cap those rather than emit
 # "difficulties" that are not actually harder or not feasible to verify.
 #   sequences      : rule-complexity tier 1..6
+# planning_blocksworld: gold is the BFS-exact optimal move count; cap the block
+# count (n = difficulty + 2, so d4 = 6 blocks) to keep that search feasible to verify.
 FAMILY_MAX_DIFF = {"sequences": 6, "knights_knaves": 6, "logic_grid": 5, "composed": 5,
-                    "unsat_csp": 6, "unsat_localize": 4}
+                    "unsat_csp": 6, "unsat_localize": 4, "planning_blocksworld": 4}
 # difficulty == number of update operations before the pivot, so it is a depth axis.
 
 # What the `difficulty` integer MEANS per family (bench-lop / E6). For most
@@ -1558,6 +1836,8 @@ DIFFICULTY_AXIS = {
     "unsat_csp": "islanders (n)",
     "unsat_localize": "islanders (n)",
     "composed": "chain / per-hop difficulty",
+    "planning_blocksworld": "blocks (n)",
+    "theory_of_mind": "belief-nesting depth",
 }
 
 
@@ -1907,6 +2187,75 @@ def _verify_multi_turn_inject(prompt, gold):
     return str(total) == str(gold)
 
 
+def _bw_parse_config(text):
+    """Re-derive the stacks from one configuration's 'on' facts."""
+    on_table = list(re.findall(r"(\w+) is on the table\.", text))
+    on = {a: b for a, b in re.findall(r"(\w+) is on (\w+)\.", text)}
+    above = {b: a for a, b in on.items()}               # support -> block resting on it
+    stacks = []
+    for t in on_table:
+        s, cur = [t], t
+        while cur in above:
+            cur = above[cur]; s.append(cur)
+        stacks.append(s)
+    return stacks
+
+
+def _verify_planning_blocksworld(prompt, gold):
+    m = re.search(r"Initial configuration:(.*?)Goal configuration:(.*?)What is the minimum",
+                  prompt, re.S)
+    if not m:
+        return False
+    init, goal = _bw_parse_config(m.group(1)), _bw_parse_config(m.group(2))
+    if not init or not goal:
+        return False
+    moves = _bw_min_moves(init, goal)
+    return moves is not None and str(moves) == str(gold)
+
+
+def _verify_theory_of_mind(prompt, gold):
+    ma = re.search(r"^(.+?) are in the room\.", prompt)
+    mo = re.search(r"(the \w+) is in (.+?)\.", prompt, re.I)
+    if not ma or not mo:
+        return False
+    agents = re.split(r",\s*|\s+and\s+", ma.group(1))
+    agentset = set(agents)
+    obj, initial_loc = mo.group(1).lower(), mo.group(2).strip()
+    events = []
+    for s in re.split(r"(?<=[.])\s+", prompt):
+        if (m := re.match(rf"(\w+) moves {re.escape(obj)} from (.+?) to (.+?)\.", s, re.I)):
+            events.append(("move", m.group(1), m.group(2), m.group(3)))
+        elif (m := re.match(r"(\w+) leaves the room\.", s)):
+            events.append(("leave", m.group(1)))
+        elif (m := re.match(r"(\w+) enters the room\.", s)):
+            events.append(("enter", m.group(1)))
+    if (mq := re.search(r"Where will (\w+) look for", prompt)):
+        chain = [mq.group(1)]
+    elif (mq := re.search(r"Where does (.+?) will look for", prompt, re.S)):
+        chain = [w for w in re.findall(r"\w+", mq.group(1)) if w in agentset]
+    else:
+        return False
+    if not chain:
+        return False
+    return _tom_belief(initial_loc, events, chain, agents) == gold
+
+
+def _verify_code_output(prompt, gold):
+    """Re-parse the function source and call from the prompt text, re-execute
+    in a restricted namespace, and check the result matches gold. The verifier
+    re-derives the answer independently from the stored gold, so any
+    prompt/gold desync is caught — exactly like the blocksworld verifier."""
+    m_func = re.search(r"(def f\([^\n]*\):(?:\n    [^\n]+)+)", prompt)
+    m_call = re.search(r"Call: (f\([^\n]*\))", prompt)
+    if not m_func or not m_call:
+        return False
+    try:
+        result = _co_exec(m_func.group(1), m_call.group(1))
+        return str(result) == str(gold)
+    except Exception:
+        return False
+
+
 _VERIFIERS = {
     "arithmetic": _verify_arithmetic,
     "state_tracking": _verify_state,
@@ -1923,6 +2272,9 @@ _VERIFIERS = {
     "dynamic_pivot": _verify_dynamic_pivot,
     "false_lemma": _verify_false_lemma,
     "noise_haystack": _verify_arithmetic,        # core is arithmetic; decoys are subject-inert
+    "planning_blocksworld": _verify_planning_blocksworld,
+    "theory_of_mind": _verify_theory_of_mind,
+    "code_output": _verify_code_output,
 }
 
 def verify_gold(p) -> bool:
